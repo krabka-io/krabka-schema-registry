@@ -1,0 +1,28 @@
+# cargo-mutants configuration — https://mutants.rs
+#
+# Read by a local `cargo mutants` run. NOT read by the `cargo_mutants_test`
+# targets: `rules_rs_mutants` enumerates mutants by copying the crate's sources
+# into a synthetic single-crate workspace under a temp dir and running
+# `cargo mutants --list` there, and this file is not among the sources it
+# copies. So under Bazel every setting below is inert -- the exclusions do not
+# exclude, and `timeout_multiplier`/`minimum_test_timeout` are replaced by the
+# rule's own `timeout_multiplier` attribute and the runner's 20s floor.
+
+test_tool = "nextest"
+profile = "mutants"
+
+# A surviving mutant in the store or the REST layer is often only caught by the
+# slower in-process suites under tests/, which boot a broker. Give every mutant
+# a generous timeout relative to the unmutated baseline so a
+# legitimately-slower-but-correct run is not misreported as a timeout survivor.
+timeout_multiplier = 5.0
+minimum_test_timeout = 120
+
+exclude_globs = [
+    # The three binaries are entrypoint glue: parse CLI args, build a
+    # `RegistryConfig` or a `SecurityConfig`, and hand it to the library. The
+    # logic they wrap lives in `src/cli.rs` and IS mutation-tested. A file glob
+    # rather than an `exclude_re` because name-regex exclusions do not reliably
+    # match struct-field-deletion mutants here.
+    "crates/schema-registry/src/bin/**",
+]

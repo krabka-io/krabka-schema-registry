@@ -1,0 +1,110 @@
+[package]
+name = "crabka-schema-registry"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Confluent Schema Registry-compatible REST service for Crabka (binary: crabka-schema-registry)"
+default-run = "crabka-schema-registry"
+repository = "https://github.com/krabka-io/krabka-schema-registry"
+homepage = "https://github.com/krabka-io/krabka-schema-registry"
+documentation = "https://docs.rs/crabka-schema-registry"
+readme = "README.md"
+keywords = ["kafka", "schema", "registry", "avro", "crabka"]
+categories = ["web-programming::http-server", "encoding"]
+
+[lints]
+workspace = true
+
+[features]
+heap-profiling = ["crabka-telemetry/heap-profiling", "dep:tikv-jemallocator"]
+
+[[bin]]
+name = "crabka-schema-registry"
+path = "src/bin/schema-registry.rs"
+
+[[bin]]
+name = "crabka-schema-push"
+path = "src/bin/schema-push.rs"
+
+[[bin]]
+name = "crabka-schema-compat-check"
+path = "src/bin/schema-compat-check.rs"
+
+[dependencies]
+assert2 = { workspace = true }
+crabka-client-core = { version = "0.4.0" }
+crabka-client-admin = { version = "0.4.0" }
+crabka-client-producer = { version = "0.4.0" }
+crabka-protocol = { version = "0.4.0", default-features = false }
+crabka-security = { version = "0.4.0" }
+crabka-authz = { version = "0.4.0" }
+crabka-metadata = { version = "0.4.0" }
+crabka-telemetry = { version = "0.4.0" }
+crabka-units = { workspace = true }
+arc-swap = { workspace = true }
+base64 = { workspace = true }
+derive_more = { workspace = true }
+bcrypt = "0.19"
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower = { workspace = true, features = ["util"] }
+axum = { workspace = true, features = ["query"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "macros", "signal", "time", "sync"] }
+tokio-util = { workspace = true, features = ["rt"] }
+bytes.workspace = true
+hex = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap = { workspace = true, features = ["env", "derive"] }
+uuid = { workspace = true }
+parking_lot = { workspace = true }
+percent-encoding = "2"
+apache-avro = { workspace = true }
+protox-parse = "0.9"
+prost-reflect = { workspace = true }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+refined_type.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+tikv-jemallocator = { version = "0.7", optional = true, features = ["profiling", "unprefixed_malloc_on_supported_platforms"] }
+
+[dev-dependencies]
+crabka-broker = { version = "0.4.0" }
+datatest-stable = { workspace = true }
+ring = { workspace = true }
+tempfile.workspace = true
+temp-env = "0.3"
+
+[[test]]
+name = "integration"
+
+[[test]]
+name = "interop"
+
+[[test]]
+name = "capture_fixtures"
+
+[[test]]
+name = "schemas_record"
+
+[[test]]
+name = "capture_compat_fixtures"
+
+[[test]]
+name = "compat_conformance"
+harness = false
+
+[[test]]
+name = "capture_protobuf_fixtures"
+
+[[test]]
+name = "capture_json_fixtures"
