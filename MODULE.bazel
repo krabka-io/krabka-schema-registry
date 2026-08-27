@@ -150,6 +150,7 @@ SIBLING_MEMBERS = {
     "crabka-ids": "crates/ids",
     "crabka-metadata": "crates/metadata",
     "crabka-security": "crates/security",
+    "crabka-trace-context": "crates/trace-context",
     "crabka-units": "crates/units",
     "crabka-voters": "crates/voters",
     # krabka-client-rs
