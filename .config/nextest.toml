@@ -1,0 +1,27 @@
+# Test-runner policy for this workspace.
+#
+# The capture and interop suites bind fixed ports — an in-process broker on
+# 9092/9093, and a `cp-schema-registry` container that advertises
+# `host.docker.internal:9092` back at it. Two of them at once fight over the
+# same ports, so they share a group that runs one at a time.
+
+[test-groups]
+schema-registry-fixed-port-captures = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'package(crabka-schema-registry) & (binary(interop) | binary(capture_fixtures) | binary(capture_admin_fixtures) | binary(capture_auth_fixtures) | binary(capture_compat_fixtures) | binary(capture_election_fixtures) | binary(capture_json_fixtures) | binary(capture_protobuf_fixtures) | binary(capture_references_fixtures))'
+test-group = 'schema-registry-fixed-port-captures'
+threads-required = 'num-test-threads'
+
+[profile.ci]
+# A hung test on CI should fail the run rather than hold a runner for its
+# whole timeout.
+slow-timeout = { period = "60s", terminate-after = 10 }
+
+[[profile.ci.overrides]]
+filter = 'package(crabka-schema-registry) & (binary(interop) | binary(capture_fixtures) | binary(capture_admin_fixtures) | binary(capture_auth_fixtures) | binary(capture_compat_fixtures) | binary(capture_election_fixtures) | binary(capture_json_fixtures) | binary(capture_protobuf_fixtures) | binary(capture_references_fixtures))'
+test-group = 'schema-registry-fixed-port-captures'
+threads-required = 'num-test-threads'
+
+[profile.ci.junit]
+path = "junit.xml"

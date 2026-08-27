@@ -1,0 +1,41 @@
+"""Root package: the public krabka schema-registry surface."""
+
+package(default_visibility = ["//visibility:public"])
+
+# Cargo.lock/Cargo.toml are consumed by `crate.from_cargo` (see //MODULE.bazel);
+# clippy.toml by the lint aspect in //tools/lint; .cargo/mutants.toml by the
+# mutation sweep, via `--@rules_rs_mutants//mutants:config` in //.bazelrc.
+exports_files([
+    ".cargo/mutants.toml",
+    "Cargo.lock",
+    "Cargo.toml",
+    "clippy.toml",
+])
+
+alias(
+    name = "schema-registry",
+    actual = "//crates/schema-registry",
+)
+
+alias(
+    name = "schema-serde",
+    actual = "//crates/schema-serde",
+)
+
+# The registry server. `bazel run //:registry_bin -- --help`.
+alias(
+    name = "registry_bin",
+    actual = "//crates/schema-registry:crabka-schema-registry",
+)
+
+# Registers a schema file under a subject.
+alias(
+    name = "push_bin",
+    actual = "//crates/schema-registry:crabka-schema-push",
+)
+
+# Checks a schema against a subject's history without registering it.
+alias(
+    name = "compat_check_bin",
+    actual = "//crates/schema-registry:crabka-schema-compat-check",
+)

@@ -1,0 +1,56 @@
+load("//bazel:defs.bzl", "crate_binary", "crate_library", "crate_tests")
+
+package(default_visibility = ["//visibility:public"])
+
+# Consumed by `crate.from_cargo` (see //MODULE.bazel).
+exports_files(["Cargo.toml"])
+
+crate_library(name = "schema-registry")
+
+# The registry server.
+# `bazel run //crates/schema-registry:crabka-schema-registry -- --help`.
+crate_binary(
+    name = "crabka-schema-registry",
+    crate_root = "src/bin/schema-registry.rs",
+    lib = ":schema-registry",
+)
+
+# Registers a schema file under a subject.
+crate_binary(
+    name = "crabka-schema-push",
+    crate_root = "src/bin/schema-push.rs",
+    lib = ":schema-registry",
+)
+
+# Checks a schema against a subject's history without registering it.
+crate_binary(
+    name = "crabka-schema-compat-check",
+    crate_root = "src/bin/schema-compat-check.rs",
+    lib = ":schema-registry",
+)
+
+crate_tests(
+    # The golden fixtures. Every suite that reads one resolves its path
+    # through `CARGO_MANIFEST_DIR`, which `rustc_env` below supplies.
+    data = glob(["tests/fixtures/**"]),
+    lib = "schema-registry",
+    # The nine capture and interop suites drive a real `cp-schema-registry`
+    # container through the `docker` CLI and bind fixed ports 9092/9093. They
+    # are `#[ignore]`d under Cargo for the same reason; `manual` is the Bazel
+    # equivalent. They exist to regenerate the fixtures the hermetic suites
+    # then assert against.
+    manual = [
+        "capture_admin_fixtures",
+        "capture_auth_fixtures",
+        "capture_compat_fixtures",
+        "capture_election_fixtures",
+        "capture_fixtures",
+        "capture_json_fixtures",
+        "capture_protobuf_fixtures",
+        "capture_references_fixtures",
+        "interop",
+    ],
+    # The suites resolve their fixture paths from this, so Bazel has to set
+    # what Cargo would have.
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/schema-registry"},
+)
