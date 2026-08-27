@@ -232,9 +232,15 @@ pub fn validate_json(schema: &str, body: &[u8]) -> Result<(), SchemaSerdeError> 
         .map_err(|e| SchemaSerdeError::Deserialize(format!("json body: {e}")))
 }
 
-#[cfg(test)]
+// Every test here drives one format backend, so the module only exists when
+// at least one is compiled in.
+#[cfg(all(test, any(feature = "avro", feature = "protobuf", feature = "json")))]
 mod tests {
-    use assert2::{assert, check};
+    // `assert!` only appears in the Avro and Protobuf cases; the JSON ones
+    // check a plain `Result`.
+    #[cfg(any(feature = "avro", feature = "protobuf"))]
+    use assert2::assert;
+    use assert2::check;
 
     use super::*;
 

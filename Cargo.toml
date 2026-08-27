@@ -40,9 +40,6 @@ axum = { version = "0.8", default-features = false, features = ["http1", "tokio"
 base64 = "0.23"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
-# Stable data-driven test harness. Use for file-backed corpora so nextest can
-# schedule each fixture as its own test process.
-datatest-stable = "0.3.3"
 # Derive boilerplate for domain newtypes (Display/From/Into/Deref/AsRef/
 # Constructor/FromStr and numeric ops) so wrappers over wire/domain primitives
 # stay one-liners. See docs/style_guides/code_style_guide.md#newtypes-for-domain-values.

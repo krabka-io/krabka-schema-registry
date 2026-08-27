@@ -4,7 +4,10 @@
 //! cases, and 92 JSON cases, all captured from real cp 7.4.0. cp is the
 //! authority, and this gate fails if our engine diverges from a single verdict.
 
-use std::path::Path;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use crabka_schema_registry::{compat, format::SchemaType, store::StoreState};
 
@@ -18,6 +21,22 @@ struct Case {
     is_compatible: bool,
 }
 
+/// Where one golden matrix lives.
+///
+/// Every fixture-backed suite in this crate anchors on `CARGO_MANIFEST_DIR`
+/// and reads the file directly. Cargo sets that variable to an absolute
+/// package path; this crate's `crate_tests` call sets it to the package's
+/// runfiles-relative path, which is what a Bazel test runs from. Naming each
+/// matrix also makes a missing fixture a failure rather than a silently
+/// smaller gate.
+fn matrix_path(file: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("compat")
+        .join(file)
+}
+
 /// Load a golden matrix fixture (`avro_matrix.json` / `protobuf_matrix.json`).
 fn load_matrix(path: &Path) -> Vec<Case> {
     serde_json::from_slice(
@@ -26,15 +45,20 @@ fn load_matrix(path: &Path) -> Vec<Case> {
     .expect("valid matrix")
 }
 
-/// Drive `ty` cases from `file` through the engine and assert that each verdict
-/// matches cp, except for any documented `known_divergences`.
-fn assert_matrix_matches_cp(
-    path: &Path,
-    ty: SchemaType,
-    known_divergences: &std::collections::HashMap<(&str, &str), bool>,
-) {
+/// Cases where this engine deliberately answers something other than cp,
+/// keyed by `(case, level)`. Empty today. An entry added here needs a comment
+/// that says why cp's verdict is the wrong one to copy.
+fn known_divergences() -> HashMap<(&'static str, &'static str), bool> {
+    HashMap::new()
+}
+
+/// Drive every `ty` case in `file` through the engine and assert that each
+/// verdict matches cp, except for any documented divergence.
+fn assert_matrix_matches_cp(file: &str, ty: SchemaType) {
+    let path = matrix_path(file);
+    let divergences = known_divergences();
     let mut mismatches = Vec::new();
-    for c in load_matrix(path) {
+    for c in load_matrix(&path) {
         let mut snap = StoreState::default();
         snap.set_subject_compat("s", c.level.clone());
         snap.register("s", ty, &c.writer, &[], None)
@@ -42,7 +66,7 @@ fn assert_matrix_matches_cp(
         let got = compat::check_against_version(&snap, "s", ty, &c.reader, &[], None)
             .expect("verdict")
             .is_compatible;
-        let expected = *known_divergences
+        let expected = *divergences
             .get(&(c.name.as_str(), c.level.as_str()))
             .unwrap_or(&c.is_compatible);
         if got != expected {
@@ -52,33 +76,20 @@ fn assert_matrix_matches_cp(
             ));
         }
     }
-    assert2::assert!(mismatches.is_empty());
+    assert2::assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
 
-fn engine_matches_cp_verdicts(path: &Path) -> datatest_stable::Result<()> {
-    std::fs::metadata(path)?;
-    let ty = match path.file_name().and_then(|name| name.to_str()) {
-        Some("avro_matrix.json") => SchemaType::Avro,
-        Some("protobuf_matrix.json") => SchemaType::Protobuf,
-        Some("json_matrix.json") => SchemaType::Json,
-        other => panic!("unexpected compatibility matrix {other:?}"),
-    };
-    let known_divergences: std::collections::HashMap<(&str, &str), bool> =
-        std::collections::HashMap::from([]);
-    assert_matrix_matches_cp(path, ty, &known_divergences);
-    Ok(())
+#[test]
+fn avro_engine_matches_cp_verdicts() {
+    assert_matrix_matches_cp("avro_matrix.json", SchemaType::Avro);
 }
 
-/// Where the compatibility matrices live.
-///
-/// datatest-stable resolves a relative `root` against the process working
-/// directory. Cargo runs a test binary from the package root, so
-/// `tests/fixtures/compat` found them; Bazel runs it from the runfiles root,
-/// where that path does not exist. Anchoring on `CARGO_MANIFEST_DIR` resolves
-/// under both: Cargo sets it to an absolute package path, and this crate's
-/// `crate_tests` call sets it to the package's runfiles-relative path.
-const COMPAT_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/compat");
+#[test]
+fn protobuf_engine_matches_cp_verdicts() {
+    assert_matrix_matches_cp("protobuf_matrix.json", SchemaType::Protobuf);
+}
 
-datatest_stable::harness! {
-    { test = engine_matches_cp_verdicts, root = COMPAT_FIXTURES, pattern = r".*_matrix\.json$" },
+#[test]
+fn json_engine_matches_cp_verdicts() {
+    assert_matrix_matches_cp("json_matrix.json", SchemaType::Json);
 }

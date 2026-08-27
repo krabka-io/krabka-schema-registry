@@ -30,9 +30,8 @@ crate_binary(
 )
 
 crate_tests(
-    # The golden fixtures. `compat_conformance` walks `tests/fixtures/compat`
-    # at run time; the REST and record suites read theirs through
-    # `CARGO_MANIFEST_DIR`, which `rustc_env` below supplies.
+    # The golden fixtures. Every suite that reads one resolves its path
+    # through `CARGO_MANIFEST_DIR`, which `rustc_env` below supplies.
     data = glob(["tests/fixtures/**"]),
     lib = "schema-registry",
     # The nine capture and interop suites drive a real `cp-schema-registry`
@@ -51,9 +50,6 @@ crate_tests(
         "capture_references_fixtures",
         "interop",
     ],
-    # `compat_conformance` is a datatest-stable harness: it enumerates the
-    # `*_matrix.json` fixtures itself rather than through libtest.
-    no_harness = ["compat_conformance"],
     # The suites resolve their fixture paths from this, so Bazel has to set
     # what Cargo would have.
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/schema-registry"},

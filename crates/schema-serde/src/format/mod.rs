@@ -4,9 +4,10 @@
 //! resolution that all formats share.
 //!
 //! Serdes are **topic-aware**, like JVM Kafka's `serialize(topic, data)`. A
-//! serde carries its key/value [`Role`], but it takes its registry subject from
-//! the topic given at call time. The subject is `<topic>-key` or
-//! `<topic>-value`, so one serde instance works across topics.
+//! serde carries its [key or value role](crate::subject::Role), but it takes
+//! its registry subject from the topic given at call time. The subject is
+//! `<topic>-key` or `<topic>-value`, so one serde instance works across
+//! topics.
 
 #[cfg(feature = "avro")]
 pub mod avro;

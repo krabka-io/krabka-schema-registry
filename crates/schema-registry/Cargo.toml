@@ -79,7 +79,6 @@ tikv-jemallocator = { version = "0.7", optional = true, features = ["profiling",
 
 [dev-dependencies]
 crabka-broker = { version = "0.4.0" }
-datatest-stable = { workspace = true }
 ring = { workspace = true }
 tempfile.workspace = true
 temp-env = "0.3"
@@ -101,7 +100,6 @@ name = "capture_compat_fixtures"
 
 [[test]]
 name = "compat_conformance"
-harness = false
 
 [[test]]
 name = "capture_protobuf_fixtures"
