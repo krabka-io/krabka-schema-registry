@@ -70,7 +70,7 @@ Include a table that maps each KIP or wire behaviour the crate owns to its verif
 List all tests, grouped by type. Include a total count per group.
 
 - **Unit tests**: table with columns `Test Function | File | Scope`.
-- **Property tests**: `proptest` and `datatest-stable` corpora — `Test Function | File | Property`.
+- **Property tests**: `proptest` and file-backed corpora — `Test Function | File | Property`.
 - **Integration tests**: separate subsection, test file path and suite breakdown (note which are `#[ignore]`d and need `testcontainers` or the JVM oracle).
 - **Differential tests**: the JVM-oracle scenarios that check this crate's behaviour.
 - **Fuzz tests** (if any): `Target | File | Status`.
