@@ -41,9 +41,21 @@ impl RegistryClient {
     /// `http://localhost:8081`.
     #[must_use]
     pub fn new(base_url: impl Into<String>) -> Self {
+        Self::with_http_client(base_url, Client::new())
+    }
+
+    /// Build a client for a registry at `base_url` over a caller-supplied
+    /// `reqwest::Client`.
+    ///
+    /// A caller that needs a request timeout, a proxy, or its own TLS
+    /// configuration builds the HTTP client itself and passes it here. A
+    /// timeout matters most: without one a registry that accepts a connection
+    /// and then stops answering holds the caller for as long as it likes.
+    #[must_use]
+    pub fn with_http_client(base_url: impl Into<String>, http: Client) -> Self {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
-            http: Client::new(),
+            http,
         }
     }
 
