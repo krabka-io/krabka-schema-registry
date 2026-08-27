@@ -69,6 +69,16 @@ fn engine_matches_cp_verdicts(path: &Path) -> datatest_stable::Result<()> {
     Ok(())
 }
 
+/// Where the compatibility matrices live.
+///
+/// datatest-stable resolves a relative `root` against the process working
+/// directory. Cargo runs a test binary from the package root, so
+/// `tests/fixtures/compat` found them; Bazel runs it from the runfiles root,
+/// where that path does not exist. Anchoring on `CARGO_MANIFEST_DIR` resolves
+/// under both: Cargo sets it to an absolute package path, and this crate's
+/// `crate_tests` call sets it to the package's runfiles-relative path.
+const COMPAT_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/compat");
+
 datatest_stable::harness! {
-    { test = engine_matches_cp_verdicts, root = "tests/fixtures/compat", pattern = r".*_matrix\.json$" },
+    { test = engine_matches_cp_verdicts, root = COMPAT_FIXTURES, pattern = r".*_matrix\.json$" },
 }
