@@ -30,16 +30,75 @@ pub fn validate_body(
     body: &[u8],
 ) -> Result<(), SchemaSerdeError> {
     match kind {
-        #[cfg(feature = "avro")]
-        SchemaKind::Avro => validate_avro(schema, body),
-        #[cfg(feature = "protobuf")]
-        SchemaKind::Protobuf => validate_protobuf(schema, message_index, body),
-        #[cfg(feature = "json")]
-        SchemaKind::Json => validate_json(schema, body),
-        #[cfg(not(all(feature = "avro", feature = "protobuf", feature = "json")))]
-        other => Err(SchemaSerdeError::Schema(format!(
-            "{other:?} body validation is not compiled into this build"
-        ))),
+        SchemaKind::Avro => dispatch::avro(schema, body),
+        SchemaKind::Protobuf => dispatch::protobuf(schema, message_index, body),
+        SchemaKind::Json => dispatch::json(schema, body),
+    }
+}
+
+/// One shim per format, so that [`validate_body`] stays a plain exhaustive
+/// match whatever the feature set is.
+///
+/// The alternative — `#[cfg]` on the match arms — leaves the dispatcher's own
+/// parameters unused in a build with no formats compiled in, and this crate
+/// treats a warning as a failure. Putting the feature gate one level down
+/// keeps every parameter used and confines the unused ones to the shims that
+/// genuinely cannot use them.
+mod dispatch {
+    #[cfg(not(all(feature = "avro", feature = "protobuf", feature = "json")))]
+    use super::SchemaKind;
+    use super::SchemaSerdeError;
+
+    /// The error a format that is not compiled in returns.
+    ///
+    /// It is an error and not a pass: a caller that cannot check a format must
+    /// not be told the body was checked.
+    ///
+    /// Gated on "not every format", because a build with all three has no shim
+    /// that calls this.
+    #[cfg(not(all(feature = "avro", feature = "protobuf", feature = "json")))]
+    fn not_compiled(kind: SchemaKind) -> SchemaSerdeError {
+        SchemaSerdeError::Schema(format!(
+            "{kind:?} body validation is not compiled into this build"
+        ))
+    }
+
+    #[cfg(feature = "avro")]
+    pub(super) fn avro(schema: &str, body: &[u8]) -> Result<(), SchemaSerdeError> {
+        super::validate_avro(schema, body)
+    }
+
+    #[cfg(not(feature = "avro"))]
+    pub(super) fn avro(_schema: &str, _body: &[u8]) -> Result<(), SchemaSerdeError> {
+        Err(not_compiled(SchemaKind::Avro))
+    }
+
+    #[cfg(feature = "protobuf")]
+    pub(super) fn protobuf(
+        schema: &str,
+        message_index: &[i32],
+        body: &[u8],
+    ) -> Result<(), SchemaSerdeError> {
+        super::validate_protobuf(schema, message_index, body)
+    }
+
+    #[cfg(not(feature = "protobuf"))]
+    pub(super) fn protobuf(
+        _schema: &str,
+        _message_index: &[i32],
+        _body: &[u8],
+    ) -> Result<(), SchemaSerdeError> {
+        Err(not_compiled(SchemaKind::Protobuf))
+    }
+
+    #[cfg(feature = "json")]
+    pub(super) fn json(schema: &str, body: &[u8]) -> Result<(), SchemaSerdeError> {
+        super::validate_json(schema, body)
+    }
+
+    #[cfg(not(feature = "json"))]
+    pub(super) fn json(_schema: &str, _body: &[u8]) -> Result<(), SchemaSerdeError> {
+        Err(not_compiled(SchemaKind::Json))
     }
 }
 
