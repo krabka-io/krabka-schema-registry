@@ -6,6 +6,7 @@
 //! ## Runtime configuration
 //!
 //! ```no_run
+//! use assert2::assert;
 //! use crabka_schema_registry::config::{RegistryConfig, SecurityConfig};
 //!
 //! let config = RegistryConfig {
@@ -20,12 +21,13 @@
 //!     security: SecurityConfig::default(),
 //! };
 //!
-//! assert_eq!(config.schemas_topic, "_schemas");
+//! assert!(config.schemas_topic == "_schemas");
 //! ```
 //!
 //! ## Compatibility checks
 //!
 //! ```no_run
+//! use assert2::assert;
 //! use crabka_schema_registry::format::{self, SchemaType};
 //!
 //! let prior = r#"{"type":"record","name":"Order","fields":[{"name":"id","type":"string"}]}"#;
