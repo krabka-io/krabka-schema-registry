@@ -1,7 +1,7 @@
-//! Golden HTTP-Basic-auth capture harness for Crabka Schema Registry slice 6.
+//! Golden HTTP-Basic-auth capture harness for Krabka Schema Registry slice 6.
 //!
 //! Boots a real `mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0` container with
-//! `authentication.method=BASIC` against an in-process Crabka broker, with the
+//! `authentication.method=BASIC` against an in-process Krabka broker, with the
 //! same networking as `capture_admin_fixtures.rs` and
 //! `capture_references_fixtures.rs`. The broker binds `0.0.0.0:9092` and
 //! advertises `host.docker.internal:9092`, while the host connects directly on
@@ -20,7 +20,7 @@
 //!     of slice 6.
 //!
 //! ```text
-//! cargo test -p crabka-schema-registry --test capture_auth_fixtures -- --ignored --nocapture
+//! cargo test -p krabka-schema-registry --test capture_auth_fixtures -- --ignored --nocapture
 //! ```
 //!
 //! Re-running this test regenerates the fixture file verbatim.
@@ -32,8 +32,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crabka_broker::{Broker, BrokerConfig};
-use crabka_units::prelude::*;
+use krabka_broker::{Broker, BrokerConfig};
+use krabka_units::prelude::*;
 
 /// The broker binds host port 9092 and cp-schema-registry reaches it via
 /// `host.docker.internal:9092` (container network) while the host connects
@@ -71,11 +71,11 @@ fn write_auth_fixture(name: &str, body: &str) {
 
 // ── broker ────────────────────────────────────────────────────────────────────
 
-async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir) {
+async fn start_host_broker() -> (krabka_broker::BrokerHandle, tempfile::TempDir) {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("crabka_broker=info,info")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("krabka_broker=info,info")),
         )
         .with_test_writer()
         .try_init();
@@ -87,15 +87,15 @@ async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir)
         listen_addr,
         advertised_listener: ADVERTISED.into(),
         log_dir: dir.path().to_path_buf(),
-        node_id: crabka_broker::NodeId(1),
+        node_id: krabka_broker::NodeId(1),
         controller_listen_addr: controller_addr,
-        controller_quorum_voters: vec![(crabka_broker::NodeId(1), controller_addr.to_string())],
+        controller_quorum_voters: vec![(krabka_broker::NodeId(1), controller_addr.to_string())],
         heartbeat_interval: secs(3),
         heartbeat_timeout: secs(9),
         replica_lag_time_max: secs(30),
         controller_election_timeout: secs(5),
         controller_heartbeat_interval: millis(500),
-        bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+        bootstrap_mode: krabka_broker::BootstrapMode::Bootstrap,
         ..BrokerConfig::default()
     };
     let handle = Broker::start(config).await.expect("start broker");

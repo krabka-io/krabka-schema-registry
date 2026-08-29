@@ -1,7 +1,7 @@
-//! Golden admin-lifecycle capture harness for Crabka Schema Registry slice 3.
+//! Golden admin-lifecycle capture harness for Krabka Schema Registry slice 3.
 //!
 //! Boots a real `mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0` container against an
-//! in-process Crabka broker, with the same networking as
+//! in-process Krabka broker, with the same networking as
 //! `capture_compat_fixtures.rs`. The broker binds `0.0.0.0:9092` and advertises
 //! `host.docker.internal:9092`, while the host connects directly on
 //! `127.0.0.1:9092`. The harness then drives the delete / mode / lookup admin
@@ -15,7 +15,7 @@
 //!     dumps them by fetching partition 0 directly from the host broker.
 //!
 //! ```text
-//! cargo test -p crabka-schema-registry --test capture_admin_fixtures -- --ignored --nocapture
+//! cargo test -p krabka-schema-registry --test capture_admin_fixtures -- --ignored --nocapture
 //! ```
 //!
 //! Re-running this test regenerates both fixture files verbatim.
@@ -27,9 +27,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crabka_broker::{Broker, BrokerConfig};
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-use crabka_units::prelude::*;
+use krabka_broker::{Broker, BrokerConfig};
+use krabka_protocol::primitives::uuid::Uuid as WireUuid;
+use krabka_units::prelude::*;
 
 /// The broker binds host port 9092 and cp-schema-registry reaches it via
 /// `host.docker.internal:9092` (container network) while the host connects
@@ -60,11 +60,11 @@ fn write_admin_fixture(name: &str, body: &str) {
 
 // ── broker ────────────────────────────────────────────────────────────────────
 
-async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir) {
+async fn start_host_broker() -> (krabka_broker::BrokerHandle, tempfile::TempDir) {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("crabka_broker=info,info")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("krabka_broker=info,info")),
         )
         .with_test_writer()
         .try_init();
@@ -76,15 +76,15 @@ async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir)
         listen_addr,
         advertised_listener: ADVERTISED.into(),
         log_dir: dir.path().to_path_buf(),
-        node_id: crabka_broker::NodeId(1),
+        node_id: krabka_broker::NodeId(1),
         controller_listen_addr: controller_addr,
-        controller_quorum_voters: vec![(crabka_broker::NodeId(1), controller_addr.to_string())],
+        controller_quorum_voters: vec![(krabka_broker::NodeId(1), controller_addr.to_string())],
         heartbeat_interval: secs(3),
         heartbeat_timeout: secs(9),
         replica_lag_time_max: secs(30),
         controller_election_timeout: secs(5),
         controller_heartbeat_interval: millis(500),
-        bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+        bootstrap_mode: krabka_broker::BootstrapMode::Bootstrap,
         ..BrokerConfig::default()
     };
     let handle = Broker::start(config).await.expect("start broker");
@@ -402,7 +402,7 @@ async fn run_mode_lifecycle(http: &reqwest::Client, base: &str) -> Vec<serde_jso
 /// leader re-routing, so the direct, non-advertised connection works.
 async fn dump_schemas_records() {
     // Resolve the `_schemas` topic_id.
-    let mut admin = crabka_client_admin::AdminClient::connect(&["127.0.0.1:9092".to_string()])
+    let mut admin = krabka_client_admin::AdminClient::connect(&["127.0.0.1:9092".to_string()])
         .await
         .expect("admin connect");
     let md = admin.metadata(&["_schemas"]).await.expect("metadata");
@@ -416,9 +416,9 @@ async fn dump_schemas_records() {
 
     // Fetch all records from offset 0 over a direct connection.
     let addr: SocketAddr = "127.0.0.1:9092".parse().expect("static addr");
-    let conn = crabka_client_core::Connection::connect_with_options(
+    let conn = krabka_client_core::Connection::connect_with_options(
         addr,
-        crabka_client_core::ConnectionOptions {
+        krabka_client_core::ConnectionOptions {
             client_id: "admin-capture".into(),
             ..Default::default()
         },
@@ -429,14 +429,14 @@ async fn dump_schemas_records() {
     let mut out: Vec<serde_json::Value> = Vec::new();
     let mut next = 0_i64;
     loop {
-        let recs = crabka_client_core::fetch_partition(
+        let recs = krabka_client_core::fetch_partition(
             &conn,
             "_schemas",
             topic_id,
             0,
             next,
-            crabka_units::millis(500),
-            crabka_units::mebibytes(1),
+            krabka_units::millis(500),
+            krabka_units::mebibytes(1),
         )
         .await
         .expect("fetch");

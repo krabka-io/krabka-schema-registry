@@ -273,7 +273,7 @@ pub fn encode_schema(
     })
 }
 
-/// Build a `SCHEMA` record carrying optional Crabka protobuf message binding
+/// Build a `SCHEMA` record carrying optional Krabka protobuf message binding
 /// metadata. `message_type = None` preserves the Confluent-compatible value
 /// shape.
 #[must_use]

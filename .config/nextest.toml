@@ -9,7 +9,7 @@
 schema-registry-fixed-port-captures = { max-threads = 1 }
 
 [[profile.default.overrides]]
-filter = 'package(crabka-schema-registry) & (binary(interop) | binary(capture_fixtures) | binary(capture_admin_fixtures) | binary(capture_auth_fixtures) | binary(capture_compat_fixtures) | binary(capture_election_fixtures) | binary(capture_json_fixtures) | binary(capture_protobuf_fixtures) | binary(capture_references_fixtures))'
+filter = 'package(krabka-schema-registry) & (binary(interop) | binary(capture_fixtures) | binary(capture_admin_fixtures) | binary(capture_auth_fixtures) | binary(capture_compat_fixtures) | binary(capture_election_fixtures) | binary(capture_json_fixtures) | binary(capture_protobuf_fixtures) | binary(capture_references_fixtures))'
 test-group = 'schema-registry-fixed-port-captures'
 threads-required = 'num-test-threads'
 
@@ -19,7 +19,7 @@ threads-required = 'num-test-threads'
 slow-timeout = { period = "60s", terminate-after = 10 }
 
 [[profile.ci.overrides]]
-filter = 'package(crabka-schema-registry) & (binary(interop) | binary(capture_fixtures) | binary(capture_admin_fixtures) | binary(capture_auth_fixtures) | binary(capture_compat_fixtures) | binary(capture_election_fixtures) | binary(capture_json_fixtures) | binary(capture_protobuf_fixtures) | binary(capture_references_fixtures))'
+filter = 'package(krabka-schema-registry) & (binary(interop) | binary(capture_fixtures) | binary(capture_admin_fixtures) | binary(capture_auth_fixtures) | binary(capture_compat_fixtures) | binary(capture_election_fixtures) | binary(capture_json_fixtures) | binary(capture_protobuf_fixtures) | binary(capture_references_fixtures))'
 test-group = 'schema-registry-fixed-port-captures'
 threads-required = 'num-test-threads'
 

@@ -1,25 +1,25 @@
-# Crabka Schema Registry — Slice 6 (Security) Design
+# Krabka Schema Registry — Slice 6 (Security) Design
 
 **Status:** approved (brainstorm) — ready for implementation plan.
 **Stacks on:** slice 5 (HA, PR #414). Branch `claude/schema-registry-slice-6`.
 
 ## Goal
 
-Add security to the standalone `crabka-schema-registry` REST service in one slice: **authentication** (HTTP Basic + Bearer/OAuth + mTLS), **authorization** (per-subject Kafka Topic ACLs), **server-side TLS** (HTTPS), and **SR↔broker client security** (SASL/TLS). Reuse Crabka's existing security crates wholesale, mirroring the grpc-gateway's P5 pattern — only HTTP Basic is new code.
+Add security to the standalone `krabka-schema-registry` REST service in one slice: **authentication** (HTTP Basic + Bearer/OAuth + mTLS), **authorization** (per-subject Kafka Topic ACLs), **server-side TLS** (HTTPS), and **SR↔broker client security** (SASL/TLS). Reuse Krabka's existing security crates wholesale, mirroring the grpc-gateway's P5 pattern — only HTTP Basic is new code.
 
 ## Non-negotiables
 
-- **Reuse, don't reinvent.** The grpc-gateway (P5, `crates/grpc-gateway/src/authz/`, `serve.rs`) is the reference. Reused: `crabka-authz` (authorizer + ACL cache), `crabka-security` (`Principal`, `OAuthBearerValidator`, `TlsConfig`, `extract_principal_from_cert`), `crabka-metadata` (`ResourceType`/`AclOperation`), `client-core` (`ClientSecurity`/`SaslCredentials`).
-- **cp-fidelity** is limited to **HTTP Basic** behavior (OSS cp-schema-registry security = HTTPS + `BASIC` + Kafka-client security; fine-grained authz is Confluent-commercial, no OSS oracle). Per-subject authz is Crabka-specific, validated by our own broker-backed tests.
+- **Reuse, don't reinvent.** The grpc-gateway (P5, `crates/grpc-gateway/src/authz/`, `serve.rs`) is the reference. Reused: `krabka-authz` (authorizer + ACL cache), `krabka-security` (`Principal`, `OAuthBearerValidator`, `TlsConfig`, `extract_principal_from_cert`), `krabka-metadata` (`ResourceType`/`AclOperation`), `client-core` (`ClientSecurity`/`SaslCredentials`).
+- **cp-fidelity** is limited to **HTTP Basic** behavior (OSS cp-schema-registry security = HTTPS + `BASIC` + Kafka-client security; fine-grained authz is Confluent-commercial, no OSS oracle). Per-subject authz is Krabka-specific, validated by our own broker-backed tests.
 - **Greenfield / Kafka-byte-exactness** per CLAUDE.md. No back-compat shims.
 - **Backwards-compatible default:** with no security configured, the service behaves exactly as today (open, anonymous, HTTP) — security is opt-in via config.
 
 ## Reused APIs (grounded)
 
-- `crabka_authz::{Authorizer, SimpleAclAuthorizer, AclSource, AuthorizationRequest<'a>, AuthorizationResult}`; `crabka_authz::cache::AclCache` (snapshot from broker `DescribeAcls`, implements `AclSource`).
-- `crabka_security::{Principal, AuthMethod, TlsConfig, ClientAuthMode, extract_principal_from_cert, OAuthBearerValidator (Unsecured|Signed|Introspection), AuthOutcome}`.
-- `crabka_metadata::{ResourceType (Topic|Group|Cluster|TransactionalId), AclOperation (Read|Write|Create|Delete|Alter|Describe|…), PatternType, PermissionType}`.
-- `crabka_client_core::{ClientSecurity, SaslCredentials, TlsConnectorConfig}`; `crabka_security::ListenerProtocol`.
+- `krabka_authz::{Authorizer, SimpleAclAuthorizer, AclSource, AuthorizationRequest<'a>, AuthorizationResult}`; `krabka_authz::cache::AclCache` (snapshot from broker `DescribeAcls`, implements `AclSource`).
+- `krabka_security::{Principal, AuthMethod, TlsConfig, ClientAuthMode, extract_principal_from_cert, OAuthBearerValidator (Unsecured|Signed|Introspection), AuthOutcome}`.
+- `krabka_metadata::{ResourceType (Topic|Group|Cluster|TransactionalId), AclOperation (Read|Write|Create|Delete|Alter|Describe|…), PatternType, PermissionType}`.
+- `krabka_client_core::{ClientSecurity, SaslCredentials, TlsConnectorConfig}`; `krabka_security::ListenerProtocol`.
 - Gateway templates: `crates/grpc-gateway/src/authz/auth_layer.rs` (Bearer middleware → `Principal` in extensions), `serve.rs` (TLS accept loop + mTLS principal), `authz/mod.rs` (AclCache refresh task + `authorize` gating).
 
 ## Architecture — middleware stack
@@ -36,7 +36,7 @@ request → [auth_layer]  resolve Principal (mTLS|Bearer|Basic|Anonymous) → ex
 
 ### Unit 1 — Authentication (`src/auth/`, new module)
 
-`auth_layer` (axum `from_fn_with_state`) resolves a `crabka_security::Principal` and inserts it into request extensions, in precedence order:
+`auth_layer` (axum `from_fn_with_state`) resolves a `krabka_security::Principal` and inserts it into request extensions, in precedence order:
 
 1. **mTLS** — if the TLS accept loop (Unit 3) already inserted an mTLS `Principal` into extensions (from the verified peer cert), use it as the highest-precedence source.
 2. **Bearer** — `Authorization: Bearer <jwt>` → reused `OAuthBearerValidator::validate` → `Principal` (auth_method `SaslOAuthBearer`). Invalid token → `401`.
@@ -45,13 +45,13 @@ request → [auth_layer]  resolve Principal (mTLS|Bearer|Basic|Anonymous) → ex
 
 `401` responses carry `WWW-Authenticate: Basic realm="<realm>"` (cp-exact) when Basic is enabled. `require_auth = true` turns a resolved Anonymous principal into a `401` (deny unauthenticated); `require_auth = false` lets Anonymous through to authz. A present-but-invalid credential is **always** `401` regardless of `require_auth`.
 
-**`BasicAuthStore`** (the only new auth primitive): an in-memory `HashMap<String, CredHash>` loaded from config — either an inline `user:bcrypt` map or an htpasswd-style file path. Verify with a constant-time compare. The default credential format is **plaintext** (cp's `PropertyFileLoginModule` stores `user=password,role` plaintext — this is the cp-parity path); a configured value shaped like a bcrypt hash (`$2…`) is instead bcrypt-verified (Crabka enhancement, `bcrypt` crate). Pure + unit-tested.
+**`BasicAuthStore`** (the only new auth primitive): an in-memory `HashMap<String, CredHash>` loaded from config — either an inline `user:bcrypt` map or an htpasswd-style file path. Verify with a constant-time compare. The default credential format is **plaintext** (cp's `PropertyFileLoginModule` stores `user=password,role` plaintext — this is the cp-parity path); a configured value shaped like a bcrypt hash (`$2…`) is instead bcrypt-verified (Krabka enhancement, `bcrypt` crate). Pure + unit-tested.
 
 ### Unit 2 — Authorization (`src/authz.rs`, new)
 
 `SchemaRegistryAuthz { authorizer: Arc<dyn Authorizer>, acls: watch::Receiver<Arc<AclCache>>, super_users: HashSet<String>, enabled: bool }`.
 
-- A background task (gateway pattern) periodically `DescribeAcls` via `crabka-client-admin` and publishes a fresh `AclCache` over a `watch` channel.
+- A background task (gateway pattern) periodically `DescribeAcls` via `krabka-client-admin` and publishes a fresh `AclCache` over a `watch` channel.
 - `authz_layer` maps the request to a permission and calls `authorizer.authorize(&*acls, &AuthorizationRequest { principal, host, resource_type, resource_name, operation })`; `Deny` → `403`. Super-users and `enabled = false` short-circuit to allow.
 - **Forward-trust:** if the request carries `forward::FORWARD_HEADER` (a write already authorized at its ingress node), `authz_layer` **skips** authorization — the primary trusts inter-node forwards (documented trust boundary; secure the inter-node link in deployment).
 
@@ -79,7 +79,7 @@ request → [auth_layer]  resolve Principal (mTLS|Bearer|Basic|Anonymous) → ex
 
 ### Unit 3 — Server TLS (`bin/schema-registry.rs` + `rest/serve.rs`, new)
 
-When `tls` config is present, serve HTTPS: build `Arc<rustls::ServerConfig>` via `crabka_security::TlsConfig::build_server_config()`, accept with `tokio-rustls` (gateway `serve.rs` accept-loop pattern). On `ClientAuthMode::Optional|Required`, run `extract_principal_from_cert` on the verified peer cert and insert the resulting `Principal { auth_method: MTls }` into request extensions (gateway `serve.rs` `peer_principal` pattern); Unit 1 consumes it as its highest-precedence source. Without `tls`, serve plain HTTP as today.
+When `tls` config is present, serve HTTPS: build `Arc<rustls::ServerConfig>` via `krabka_security::TlsConfig::build_server_config()`, accept with `tokio-rustls` (gateway `serve.rs` accept-loop pattern). On `ClientAuthMode::Optional|Required`, run `extract_principal_from_cert` on the verified peer cert and insert the resulting `Principal { auth_method: MTls }` into request extensions (gateway `serve.rs` `peer_principal` pattern); Unit 1 consumes it as its highest-precedence source. Without `tls`, serve plain HTTP as today.
 
 ### Unit 4 — Client→broker security (`config.rs` + `kafkastore`)
 
@@ -95,9 +95,9 @@ SecurityConfig {
   realm: String,                           // WWW-Authenticate realm
   basic: Option<BasicAuthConfig>,          // file path or inline user→hash map
   bearer: Option<BearerAuthConfig>,        // reuse broker OAuth config (issuer/JWKS/principal-claim/…)
-  tls: Option<crabka_security::TlsConfig>, // server cert/key/CA + client_auth
+  tls: Option<krabka_security::TlsConfig>, // server cert/key/CA + client_auth
   authz: Option<AuthzConfig>,              // enable + super_users + acl_refresh_interval
-  client: crabka_client_core::ClientSecurity, // SR↔broker SASL/TLS (default PLAINTEXT)
+  client: krabka_client_core::ClientSecurity, // SR↔broker SASL/TLS (default PLAINTEXT)
 }
 ```
 
@@ -135,7 +135,7 @@ OSS `cp-schema-registry` security = HTTPS + `BASIC` auth + Kafka-client security
 
 ```
 crates/schema-registry/
-  Cargo.toml                 # + crabka-authz, crabka-security, crabka-metadata, crabka-client-admin, base64, (bcrypt?)
+  Cargo.toml                 # + krabka-authz, krabka-security, krabka-metadata, krabka-client-admin, base64, (bcrypt?)
   src/
     config.rs                # + SecurityConfig and sub-structs
     auth/mod.rs              # auth_layer + AuthState; Principal resolution + 401 logic

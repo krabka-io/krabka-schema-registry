@@ -1,6 +1,6 @@
 //! End-to-end gate for schema-registry slice 1: REST -> register -> produce to
 //! `_schemas` -> group-less reader replay -> in-memory store -> GET, against a
-//! real in-process Crabka broker. It drives the registry's REST router through
+//! real in-process Krabka broker. It drives the registry's REST router through
 //! `tower`'s `oneshot`, so it needs no live HTTP socket, while the `KafkaStore`
 //! talks to the broker over the wire.
 //!
@@ -12,8 +12,8 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use crabka_broker::{Broker, BrokerConfig};
-use crabka_schema_registry::{
+use krabka_broker::{Broker, BrokerConfig};
+use krabka_schema_registry::{
     config::{RegistryConfig, SecurityConfig},
     format::SchemaType,
     ids::{SchemaId, SchemaVersion},
@@ -34,7 +34,7 @@ use tower::ServiceExt;
 async fn boot_registry(
     rf: i32,
 ) -> (
-    crabka_broker::BrokerHandle,
+    krabka_broker::BrokerHandle,
     std::sync::Arc<KafkaStore>,
     CancellationToken,
     tempfile::TempDir,
@@ -51,7 +51,7 @@ async fn boot_registry(
         advertised_url: "http://127.0.0.1:0".into(),
         group_id: "schema-registry".into(),
         leader_eligibility: true,
-        runtime: crabka_schema_registry::config::RegistryRuntimeConfig::default(),
+        runtime: krabka_schema_registry::config::RegistryRuntimeConfig::default(),
         security: SecurityConfig::default(),
     };
     let cancel = CancellationToken::new();

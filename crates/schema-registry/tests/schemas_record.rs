@@ -1,4 +1,4 @@
-use crabka_schema_registry::{
+use krabka_schema_registry::{
     format::SchemaType,
     ids::{SchemaId, SchemaVersion},
     kafkastore::record::{SchemaKey, SchemaRecord, SchemaValue, encode_schema},

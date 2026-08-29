@@ -174,7 +174,7 @@ pub struct SecurityLayers {
 /// axum runs the *last*-added `.layer()` first. To get an execution order of
 /// auth → authz → forward → handler, we add them in the reverse order: forward,
 /// then authz, then auth on the outside. Authentication therefore runs first
-/// and inserts the [`crabka_security::Principal`] that authorization reads.
+/// and inserts the [`krabka_security::Principal`] that authorization reads.
 pub fn router_with_security(state: AppState, sec: SecurityLayers) -> Router {
     let mut r = router(state).layer(axum::middleware::from_fn_with_state(
         sec.forward,

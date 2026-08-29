@@ -1,6 +1,6 @@
 +++
 title = "Schema Registry Deployment"
-description = "Deploy Crabka's Confluent-compatible Schema Registry: a REST service that stores schemas in the compacted _schemas topic and enforces compatibility checks."
+description = "Deploy Krabka's Confluent-compatible Schema Registry: a REST service that stores schemas in the compacted _schemas topic and enforces compatibility checks."
 weight = 20
 template = "docs/page.html"
 
@@ -8,7 +8,7 @@ template = "docs/page.html"
 mermaid = true
 +++
 
-Crabka includes a Confluent Schema Registry-compatible REST service. It runs as
+Krabka includes a Confluent Schema Registry-compatible REST service. It runs as
 a separate Kafka client and stores state in the compacted `_schemas` topic. You
 can deploy it with the operator or as a standalone Helm release.
 
@@ -46,17 +46,17 @@ The next sections show how to deploy the registry.
 
 ## Operator-managed (recommended)
 
-Apply a `SchemaRegistry` next to a managed `Kafka`. The `crabka.io/cluster`
+Apply a `SchemaRegistry` next to a managed `Kafka`. The `krabka.io/cluster`
 label binds it to the cluster. The registry gets its bootstrap address from the
 internal listener.
 
 ```yaml
-apiVersion: crabka.io/v1alpha1
+apiVersion: krabka.io/v1alpha1
 kind: SchemaRegistry
 metadata:
   name: sr
   labels:
-    crabka.io/cluster: demo
+    krabka.io/cluster: demo
 spec:
   replicas: 3
   schemasTopicReplicationFactor: 3
@@ -70,7 +70,7 @@ lists every field.
 ## Standalone (Helm, external broker)
 
 ```bash
-helm install sr charts/crabka-schema-registry \
+helm install sr charts/krabka-schema-registry \
   --set bootstrapServers=my-broker:9092
 ```
 

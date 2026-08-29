@@ -1,9 +1,9 @@
 //! Authentication middleware.
 //!
-//! It resolves a `crabka_security::Principal` from each request into the
+//! It resolves a `krabka_security::Principal` from each request into the
 //! request extensions, in the order mTLS → Bearer → Basic → Anonymous. It
 //! returns `401` on a bad credential, and on a missing credential when
-//! `require_auth` is set. It reuses the `crabka_security` validators, and only
+//! `require_auth` is set. It reuses the `krabka_security` validators, and only
 //! `BasicAuthStore` is local. It models `grpc-gateway/src/authz/auth_layer.rs`.
 pub mod basic;
 
@@ -17,7 +17,7 @@ use axum::{
 };
 use base64::Engine as _;
 use basic::BasicAuthStore;
-use crabka_security::{AuthMethod, OAuthBearerValidator, Principal};
+use krabka_security::{AuthMethod, OAuthBearerValidator, Principal};
 
 /// An mTLS-authenticated principal that the TLS accept loop inserts.
 /// `auth_layer` consumes it as the highest-precedence source.
@@ -278,7 +278,7 @@ mod tests {
         // principal name resolves to that principal (exercises the configured-
         // validator success branch of `resolve`).
         use base64::Engine as _;
-        let validator = OAuthBearerValidator::Unsecured(crabka_security::UnsecuredJwsValidator {
+        let validator = OAuthBearerValidator::Unsecured(krabka_security::UnsecuredJwsValidator {
             principal_claim_name: "sub".to_string(),
             ..Default::default()
         });

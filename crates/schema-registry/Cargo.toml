@@ -1,49 +1,49 @@
 [package]
-name = "crabka-schema-registry"
+name = "krabka-schema-registry"
 publish = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
-description = "Confluent Schema Registry-compatible REST service for Crabka (binary: crabka-schema-registry)"
-default-run = "crabka-schema-registry"
+description = "Confluent Schema Registry-compatible REST service for Krabka (binary: krabka-schema-registry)"
+default-run = "krabka-schema-registry"
 repository = "https://github.com/krabka-io/krabka-schema-registry"
 homepage = "https://github.com/krabka-io/krabka-schema-registry"
-documentation = "https://docs.rs/crabka-schema-registry"
+documentation = "https://docs.rs/krabka-schema-registry"
 readme = "README.md"
-keywords = ["kafka", "schema", "registry", "avro", "crabka"]
+keywords = ["kafka", "schema", "registry", "avro", "krabka"]
 categories = ["web-programming::http-server", "encoding"]
 
 [lints]
 workspace = true
 
 [features]
-heap-profiling = ["crabka-telemetry/heap-profiling", "dep:tikv-jemallocator"]
+heap-profiling = ["krabka-telemetry/heap-profiling", "dep:tikv-jemallocator"]
 
 [[bin]]
-name = "crabka-schema-registry"
+name = "krabka-schema-registry"
 path = "src/bin/schema-registry.rs"
 
 [[bin]]
-name = "crabka-schema-push"
+name = "krabka-schema-push"
 path = "src/bin/schema-push.rs"
 
 [[bin]]
-name = "crabka-schema-compat-check"
+name = "krabka-schema-compat-check"
 path = "src/bin/schema-compat-check.rs"
 
 [dependencies]
 assert2 = { workspace = true }
-crabka-client-core = { version = "0.4.0" }
-crabka-client-admin = { version = "0.4.0" }
-crabka-client-producer = { version = "0.4.0" }
-crabka-protocol = { version = "0.4.0", default-features = false }
-crabka-security = { version = "0.4.0" }
-crabka-authz = { version = "0.4.0" }
-crabka-metadata = { version = "0.4.0" }
-crabka-telemetry = { version = "0.4.0" }
-crabka-units = { workspace = true }
+krabka-client-core = { version = "0.4.0" }
+krabka-client-admin = { version = "0.4.0" }
+krabka-client-producer = { version = "0.4.0" }
+krabka-protocol = { version = "0.4.0", default-features = false }
+krabka-security = { version = "0.4.0" }
+krabka-authz = { version = "0.4.0" }
+krabka-metadata = { version = "0.4.0" }
+krabka-telemetry = { version = "0.4.0" }
+krabka-units = { workspace = true }
 arc-swap = { workspace = true }
 base64 = { workspace = true }
 derive_more = { workspace = true }
@@ -78,7 +78,7 @@ refined_type.workspace = true
 tikv-jemallocator = { version = "0.7", optional = true, features = ["profiling", "unprefixed_malloc_on_supported_platforms"] }
 
 [dev-dependencies]
-crabka-broker = { version = "0.4.0" }
+krabka-broker = { version = "0.4.0" }
 ring = { workspace = true }
 tempfile.workspace = true
 temp-env = "0.3"

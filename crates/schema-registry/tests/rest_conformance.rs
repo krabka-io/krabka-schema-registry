@@ -12,8 +12,8 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use crabka_broker::{Broker, BrokerConfig};
-use crabka_schema_registry::{
+use krabka_broker::{Broker, BrokerConfig};
+use krabka_schema_registry::{
     config::{RegistryConfig, SecurityConfig},
     kafkastore::KafkaStore,
     rest::{self, AppState},
@@ -51,7 +51,7 @@ fn fixture_error_body(name: &str) -> (u16, serde_json::Value) {
 // ── broker / registry boot ───────────────────────────────────────────────────
 
 async fn boot_registry() -> (
-    crabka_broker::BrokerHandle,
+    krabka_broker::BrokerHandle,
     std::sync::Arc<KafkaStore>,
     CancellationToken,
     tempfile::TempDir,
@@ -68,7 +68,7 @@ async fn boot_registry() -> (
         advertised_url: "http://127.0.0.1:0".into(),
         group_id: "schema-registry".into(),
         leader_eligibility: true,
-        runtime: crabka_schema_registry::config::RegistryRuntimeConfig::default(),
+        runtime: krabka_schema_registry::config::RegistryRuntimeConfig::default(),
         security: SecurityConfig::default(),
     };
     let cancel = CancellationToken::new();

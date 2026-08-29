@@ -1,7 +1,7 @@
-//! Golden compatibility-verdict capture harness for Crabka Schema Registry slice 2c.
+//! Golden compatibility-verdict capture harness for Krabka Schema Registry slice 2c.
 //!
 //! Boots a real `mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0` container against an
-//! in-process Crabka broker, then drives the compatibility check API for ~47
+//! in-process Krabka broker, then drives the compatibility check API for ~47
 //! JSON Schema cases × 3 compatibility levels ≈ 141 entries. Verdicts are written to:
 //!
 //!   `tests/fixtures/compat/json_matrix.json`
@@ -9,7 +9,7 @@
 //! That file is the oracle for Task 6's JSON Schema compatibility engine calibration.
 //!
 //! ```text
-//! cargo test -p crabka-schema-registry --test capture_json_fixtures -- --ignored --nocapture
+//! cargo test -p krabka-schema-registry --test capture_json_fixtures -- --ignored --nocapture
 //! ```
 //!
 //! Re-running this test regenerates the fixture file verbatim.
@@ -21,8 +21,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crabka_broker::{Broker, BrokerConfig, NodeId};
-use crabka_units::prelude::*;
+use krabka_broker::{Broker, BrokerConfig, NodeId};
+use krabka_units::prelude::*;
 
 /// The broker binds host port 9092 and cp-schema-registry reaches it via
 /// `host.docker.internal:9092` (container network) while the host connects
@@ -53,11 +53,11 @@ fn write_compat_fixture(name: &str, body: &str) {
 
 // ── broker ────────────────────────────────────────────────────────────────────
 
-async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir) {
+async fn start_host_broker() -> (krabka_broker::BrokerHandle, tempfile::TempDir) {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("crabka_broker=info,info")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("krabka_broker=info,info")),
         )
         .with_test_writer()
         .try_init();
@@ -77,7 +77,7 @@ async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir)
         replica_lag_time_max: secs(30),
         controller_election_timeout: secs(5),
         controller_heartbeat_interval: millis(500),
-        bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+        bootstrap_mode: krabka_broker::BootstrapMode::Bootstrap,
         ..BrokerConfig::default()
     };
     let handle = Broker::start(config).await.expect("start broker");
