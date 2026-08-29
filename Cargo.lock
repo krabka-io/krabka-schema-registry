@@ -818,7 +818,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "crabka-audit"
+name = "krabka-audit"
 version = "0.4.0"
 source = "git+https://github.com/krabka-io/krabka-broker?rev=25800d1f9511d56807343dfedb1df935e379b108#25800d1f9511d56807343dfedb1df935e379b108"
 dependencies = [
@@ -826,9 +826,9 @@ dependencies = [
  "async-trait",
  "bytes",
  "clap",
- "crabka-ids",
- "crabka-protocol",
- "crabka-units",
+ "krabka-ids",
+ "krabka-protocol",
+ "krabka-units",
  "derive_more",
  "qubit-clock",
  "ring",
@@ -841,18 +841,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "crabka-authz"
+name = "krabka-authz"
 version = "0.4.0"
 source = "git+https://github.com/krabka-io/krabka-broker?rev=25800d1f9511d56807343dfedb1df935e379b108#25800d1f9511d56807343dfedb1df935e379b108"
 dependencies = [
  "assert2",
- "crabka-metadata",
- "crabka-security",
+ "krabka-metadata",
+ "krabka-security",
  "tracing",
 ]
 
 [[package]]
-name = "crabka-broker"
+name = "krabka-broker"
 version = "0.4.0"
 source = "git+https://github.com/krabka-io/krabka-broker?rev=25800d1f9511d56807343dfedb1df935e379b108#25800d1f9511d56807343dfedb1df935e379b108"
 dependencies = [
@@ -862,26 +862,26 @@ dependencies = [
  "base64 0.23.1",
  "bytes",
  "clap",
- "crabka-audit",
- "crabka-authz",
- "crabka-client-core",
- "crabka-compression",
- "crabka-ids",
- "crabka-kraft-core",
- "crabka-log",
- "crabka-metadata",
- "crabka-object-store",
- "crabka-protocol",
- "crabka-raft",
- "crabka-records-legacy",
- "crabka-remote-storage",
- "crabka-remote-storage-topic",
- "crabka-security",
- "crabka-telemetry",
- "crabka-throttle",
- "crabka-units",
- "crabka-verified",
- "crabka-voters",
+ "krabka-audit",
+ "krabka-authz",
+ "krabka-client-core",
+ "krabka-compression",
+ "krabka-ids",
+ "krabka-kraft-core",
+ "krabka-log",
+ "krabka-metadata",
+ "krabka-object-store",
+ "krabka-protocol",
+ "krabka-raft",
+ "krabka-records-legacy",
+ "krabka-remote-storage",
+ "krabka-remote-storage-topic",
+ "krabka-security",
+ "krabka-telemetry",
+ "krabka-throttle",
+ "krabka-units",
+ "krabka-verified",
+ "krabka-voters",
  "crc32c",
  "dashmap",
  "exponential-backoff",
@@ -924,19 +924,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "crabka-client-admin"
+name = "krabka-client-admin"
 version = "0.4.0"
 source = "git+https://github.com/krabka-io/krabka-client-rs?rev=dbea46923441c19b7858d7e3278ca5b77af2e00b#dbea46923441c19b7858d7e3278ca5b77af2e00b"
 dependencies = [
  "assert2",
  "async-trait",
  "bytes",
- "crabka-client-core",
- "crabka-ids",
- "crabka-metadata",
- "crabka-protocol",
- "crabka-security",
- "crabka-units",
+ "krabka-client-core",
+ "krabka-ids",
+ "krabka-metadata",
+ "krabka-protocol",
+ "krabka-security",
+ "krabka-units",
  "ring",
  "thiserror 2.0.20",
  "tokio",
@@ -945,17 +945,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "crabka-client-consumer"
+name = "krabka-client-consumer"
 version = "0.4.0"
 source = "git+https://github.com/krabka-io/krabka-client-rs?rev=dbea46923441c19b7858d7e3278ca5b77af2e00b#dbea46923441c19b7858d7e3278ca5b77af2e00b"
 dependencies = [
  "assert2",
  "bon",
  "bytes",
- "crabka-client-core",
- "crabka-ids",
- "crabka-protocol",
- "crabka-units",
+ "krabka-client-core",
+ "krabka-ids",
+ "krabka-protocol",
+ "krabka-units",
  "futures-util",
  "refined_type",
  "thiserror 2.0.20",
@@ -965,17 +965,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "crabka-client-core"
+name = "krabka-client-core"
 version = "0.4.0"
 source = "git+https://github.com/krabka-io/krabka-client-rs?rev=dbea46923441c19b7858d7e3278ca5b77af2e00b#dbea46923441c19b7858d7e3278ca5b77af2e00b"
 dependencies = [
  "async-trait",
  "bon",
  "bytes",
- "crabka-ids",
- "crabka-protocol",
- "crabka-security",
- "crabka-units",
+ "krabka-ids",
+ "krabka-protocol",
+ "krabka-security",
+ "krabka-units",
  "dashmap",
  "futures-util",
  "refined_type",
@@ -989,7 +989,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "crabka-client-producer"
+name = "krabka-client-producer"
 version = "0.4.0"
 source = "git+https://github.com/krabka-io/krabka-client-rs?rev=dbea46923441c19b7858d7e3278ca5b77af2e00b#dbea46923441c19b7858d7e3278ca5b77af2e00b"
 dependencies = [
@@ -997,11 +997,11 @@ dependencies = [
  "async-trait",
  "bon",
  "bytes",
- "crabka-client-consumer",
- "crabka-client-core",
- "crabka-compression",
- "crabka-protocol",
- "crabka-units",
+ "krabka-client-consumer",
+ "krabka-client-core",
+ "krabka-compression",
+ "krabka-protocol",
+ "krabka-units",
  "dashmap",
  "futures",
  "refined_type",
@@ -1012,13 +1012,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "crabka-compression"
+name = "krabka-compression"
 version = "0.4.0"
 source = "git+https://github.com/krabka-io/krabka-protocol?rev=7a5aab7499455c068e8ff2f269b05b21fd599046#7a5aab7499455c068e8ff2f269b05b21fd599046"
 dependencies = [
  "assert2",
  "bytes",
- "crabka-units",
+ "krabka-units",
  "flate2",
  "lz4_flex",
  "refined_type",
@@ -1028,7 +1028,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "crabka-ids"
+name = "krabka-ids"
 version = "0.4.0"
 source = "git+https://github.com/krabka-io/krabka-protocol?rev=7a5aab7499455c068e8ff2f269b05b21fd599046#7a5aab7499455c068e8ff2f269b05b21fd599046"
 dependencies = [
@@ -1038,32 +1038,32 @@ dependencies = [
 ]
 
 [[package]]
-name = "crabka-kraft-core"
+name = "krabka-kraft-core"
 version = "0.4.0"
 source = "git+https://github.com/krabka-io/krabka-broker?rev=25800d1f9511d56807343dfedb1df935e379b108#25800d1f9511d56807343dfedb1df935e379b108"
 dependencies = [
  "assert2",
  "bytes",
- "crabka-units",
- "crabka-verified",
- "crabka-voters",
+ "krabka-units",
+ "krabka-verified",
+ "krabka-voters",
  "refined_type",
  "tracing",
  "uuid",
 ]
 
 [[package]]
-name = "crabka-log"
+name = "krabka-log"
 version = "0.4.0"
 source = "git+https://github.com/krabka-io/krabka-broker?rev=25800d1f9511d56807343dfedb1df935e379b108#25800d1f9511d56807343dfedb1df935e379b108"
 dependencies = [
  "assert2",
  "bytes",
- "crabka-compression",
- "crabka-ids",
- "crabka-protocol",
- "crabka-units",
- "crabka-verified",
+ "krabka-compression",
+ "krabka-ids",
+ "krabka-protocol",
+ "krabka-units",
+ "krabka-verified",
  "crc32c",
  "thiserror 2.0.20",
  "tracing",
@@ -1071,7 +1071,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "crabka-logfmt"
+name = "krabka-logfmt"
 version = "0.4.0"
 source = "git+https://github.com/krabka-io/krabka-broker?rev=25800d1f9511d56807343dfedb1df935e379b108#25800d1f9511d56807343dfedb1df935e379b108"
 dependencies = [
@@ -1082,17 +1082,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "crabka-metadata"
+name = "krabka-metadata"
 version = "0.4.0"
 source = "git+https://github.com/krabka-io/krabka-protocol?rev=7a5aab7499455c068e8ff2f269b05b21fd599046#7a5aab7499455c068e8ff2f269b05b21fd599046"
 dependencies = [
  "assert2",
  "bytes",
- "crabka-ids",
- "crabka-protocol",
- "crabka-security",
- "crabka-units",
- "crabka-voters",
+ "krabka-ids",
+ "krabka-protocol",
+ "krabka-security",
+ "krabka-units",
+ "krabka-voters",
  "serde",
  "serde-wincode",
  "thiserror 2.0.20",
@@ -1102,7 +1102,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "crabka-object-store"
+name = "krabka-object-store"
 version = "0.4.0"
 source = "git+https://github.com/krabka-io/krabka-broker?rev=25800d1f9511d56807343dfedb1df935e379b108#25800d1f9511d56807343dfedb1df935e379b108"
 dependencies = [
@@ -1116,15 +1116,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "crabka-protocol"
+name = "krabka-protocol"
 version = "0.4.0"
 source = "git+https://github.com/krabka-io/krabka-protocol?rev=7a5aab7499455c068e8ff2f269b05b21fd599046#7a5aab7499455c068e8ff2f269b05b21fd599046"
 dependencies = [
  "arbitrary",
  "assert2",
  "bytes",
- "crabka-compression",
- "crabka-units",
+ "krabka-compression",
+ "krabka-units",
  "crc32c",
  "serde_json",
  "strum 0.28.0",
@@ -1133,7 +1133,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "crabka-raft"
+name = "krabka-raft"
 version = "0.4.0"
 source = "git+https://github.com/krabka-io/krabka-broker?rev=25800d1f9511d56807343dfedb1df935e379b108#25800d1f9511d56807343dfedb1df935e379b108"
 dependencies = [
@@ -1141,15 +1141,15 @@ dependencies = [
  "async-trait",
  "base64 0.23.1",
  "bytes",
- "crabka-client-core",
- "crabka-ids",
- "crabka-kraft-core",
- "crabka-log",
- "crabka-metadata",
- "crabka-protocol",
- "crabka-security",
- "crabka-units",
- "crabka-verified",
+ "krabka-client-core",
+ "krabka-ids",
+ "krabka-kraft-core",
+ "krabka-log",
+ "krabka-metadata",
+ "krabka-protocol",
+ "krabka-security",
+ "krabka-units",
+ "krabka-verified",
  "dashmap",
  "futures-util",
  "refined_type",
@@ -1165,33 +1165,33 @@ dependencies = [
 ]
 
 [[package]]
-name = "crabka-records-legacy"
+name = "krabka-records-legacy"
 version = "0.4.0"
 source = "git+https://github.com/krabka-io/krabka-broker?rev=25800d1f9511d56807343dfedb1df935e379b108#25800d1f9511d56807343dfedb1df935e379b108"
 dependencies = [
  "assert2",
  "bytes",
- "crabka-compression",
- "crabka-ids",
- "crabka-protocol",
- "crabka-units",
+ "krabka-compression",
+ "krabka-ids",
+ "krabka-protocol",
+ "krabka-units",
  "crc32fast",
  "thiserror 2.0.20",
 ]
 
 [[package]]
-name = "crabka-remote-storage"
+name = "krabka-remote-storage"
 version = "0.4.0"
 source = "git+https://github.com/krabka-io/krabka-broker?rev=25800d1f9511d56807343dfedb1df935e379b108#25800d1f9511d56807343dfedb1df935e379b108"
 dependencies = [
  "base64 0.23.1",
  "bytes",
  "clap",
- "crabka-audit",
- "crabka-ids",
- "crabka-object-store",
- "crabka-protocol",
- "crabka-units",
+ "krabka-audit",
+ "krabka-ids",
+ "krabka-object-store",
+ "krabka-protocol",
+ "krabka-units",
  "derive_more",
  "futures-util",
  "hex",
@@ -1208,19 +1208,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "crabka-remote-storage-topic"
+name = "krabka-remote-storage-topic"
 version = "0.4.0"
 source = "git+https://github.com/krabka-io/krabka-broker?rev=25800d1f9511d56807343dfedb1df935e379b108#25800d1f9511d56807343dfedb1df935e379b108"
 dependencies = [
  "async-trait",
  "bytes",
- "crabka-client-admin",
- "crabka-client-core",
- "crabka-client-producer",
- "crabka-ids",
- "crabka-protocol",
- "crabka-remote-storage",
- "crabka-units",
+ "krabka-client-admin",
+ "krabka-client-core",
+ "krabka-client-producer",
+ "krabka-ids",
+ "krabka-protocol",
+ "krabka-remote-storage",
+ "krabka-units",
  "futures-util",
  "refined_type",
  "thiserror 2.0.20",
@@ -1231,7 +1231,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "crabka-schema-registry"
+name = "krabka-schema-registry"
 version = "0.4.0"
 dependencies = [
  "anyhow",
@@ -1243,16 +1243,16 @@ dependencies = [
  "bcrypt",
  "bytes",
  "clap",
- "crabka-authz",
- "crabka-broker",
- "crabka-client-admin",
- "crabka-client-core",
- "crabka-client-producer",
- "crabka-metadata",
- "crabka-protocol",
- "crabka-security",
- "crabka-telemetry",
- "crabka-units",
+ "krabka-authz",
+ "krabka-broker",
+ "krabka-client-admin",
+ "krabka-client-core",
+ "krabka-client-producer",
+ "krabka-metadata",
+ "krabka-protocol",
+ "krabka-security",
+ "krabka-telemetry",
+ "krabka-units",
  "derive_more",
  "hex",
  "hyper",
@@ -1281,13 +1281,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "crabka-schema-serde"
+name = "krabka-schema-serde"
 version = "0.4.0"
 dependencies = [
  "apache-avro",
  "assert2",
  "bytes",
- "crabka-units",
+ "krabka-units",
  "hex",
  "jsonschema",
  "prost 0.14.4",
@@ -1303,7 +1303,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "crabka-security"
+name = "krabka-security"
 version = "0.4.0"
 source = "git+https://github.com/krabka-io/krabka-protocol?rev=7a5aab7499455c068e8ff2f269b05b21fd599046#7a5aab7499455c068e8ff2f269b05b21fd599046"
 dependencies = [
@@ -1312,7 +1312,7 @@ dependencies = [
  "async-trait",
  "base64 0.23.1",
  "bytes",
- "crabka-units",
+ "krabka-units",
  "hmac",
  "jsonpath-rust",
  "pbkdf2",
@@ -1337,16 +1337,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "crabka-telemetry"
+name = "krabka-telemetry"
 version = "0.4.0"
 source = "git+https://github.com/krabka-io/krabka-broker?rev=25800d1f9511d56807343dfedb1df935e379b108#25800d1f9511d56807343dfedb1df935e379b108"
 dependencies = [
  "assert2",
  "axum",
  "clap",
- "crabka-logfmt",
- "crabka-trace-context",
- "crabka-units",
+ "krabka-logfmt",
+ "krabka-trace-context",
+ "krabka-units",
  "flate2",
  "jemalloc_pprof",
  "opentelemetry",
@@ -1364,19 +1364,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "crabka-throttle"
+name = "krabka-throttle"
 version = "0.4.0"
 source = "git+https://github.com/krabka-io/krabka-broker?rev=25800d1f9511d56807343dfedb1df935e379b108#25800d1f9511d56807343dfedb1df935e379b108"
 dependencies = [
  "assert2",
- "crabka-units",
+ "krabka-units",
  "creusot-std",
  "derive_more",
  "qubit-clock",
 ]
 
 [[package]]
-name = "crabka-trace-context"
+name = "krabka-trace-context"
 version = "0.4.0"
 source = "git+https://github.com/krabka-io/krabka-protocol?rev=7a5aab7499455c068e8ff2f269b05b21fd599046#7a5aab7499455c068e8ff2f269b05b21fd599046"
 dependencies = [
@@ -1388,7 +1388,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "crabka-units"
+name = "krabka-units"
 version = "0.4.0"
 source = "git+https://github.com/krabka-io/krabka-protocol?rev=7a5aab7499455c068e8ff2f269b05b21fd599046#7a5aab7499455c068e8ff2f269b05b21fd599046"
 dependencies = [
@@ -1399,7 +1399,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "crabka-verified"
+name = "krabka-verified"
 version = "0.4.0"
 source = "git+https://github.com/krabka-io/krabka-broker?rev=25800d1f9511d56807343dfedb1df935e379b108#25800d1f9511d56807343dfedb1df935e379b108"
 dependencies = [
@@ -1408,12 +1408,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "crabka-voters"
+name = "krabka-voters"
 version = "0.4.0"
 source = "git+https://github.com/krabka-io/krabka-protocol?rev=7a5aab7499455c068e8ff2f269b05b21fd599046#7a5aab7499455c068e8ff2f269b05b21fd599046"
 dependencies = [
  "assert2",
- "crabka-ids",
+ "krabka-ids",
  "serde",
  "uuid",
 ]

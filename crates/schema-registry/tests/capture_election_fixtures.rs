@@ -1,16 +1,16 @@
-//! Golden `"sr"`-election capture harness for Crabka Schema Registry slice 5 (HA).
+//! Golden `"sr"`-election capture harness for Krabka Schema Registry slice 5 (HA).
 //!
 //! Boots **two** real `mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0` containers against
-//! an in-process Crabka broker, with the same networking as
+//! an in-process Krabka broker, with the same networking as
 //! `capture_admin_fixtures.rs` and `capture_references_fixtures.rs`. The broker
 //! binds `0.0.0.0:9092` and advertises `host.docker.internal:9092`, while the
 //! host connects directly on `127.0.0.1:9092`.
 //!
-//! Both cp nodes point at the same Crabka broker and share the same election
+//! Both cp nodes point at the same Krabka broker and share the same election
 //! group id, so they form the `"sr"` Kafka group and elect a master *through
 //! our coordinator*. A cp node answers `GET /subjects` with 200 only after that
 //! election has completed, so each node's REST readiness PROVES the election
-//! round-tripped end-to-end against Crabka.
+//! round-tripped end-to-end against Krabka.
 //!
 //! Once both nodes are ready, the harness reads the group via `DescribeGroups`
 //! from the host side and captures, per member, the exact `member_metadata`
@@ -31,7 +31,7 @@
 //!     `select_master` comparator.
 //!
 //! ```text
-//! cargo test -p crabka-schema-registry --test capture_election_fixtures -- --ignored --nocapture
+//! cargo test -p krabka-schema-registry --test capture_election_fixtures -- --ignored --nocapture
 //! ```
 //!
 //! Re-running this test regenerates both fixture files verbatim.
@@ -43,10 +43,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crabka_broker::{Broker, BrokerConfig};
-use crabka_client_core::Client;
-use crabka_protocol::owned::describe_groups_request::DescribeGroupsRequest;
-use crabka_units::prelude::*;
+use krabka_broker::{Broker, BrokerConfig};
+use krabka_client_core::Client;
+use krabka_protocol::owned::describe_groups_request::DescribeGroupsRequest;
+use krabka_units::prelude::*;
 
 /// The broker binds host port 9092 and cp-schema-registry reaches it via
 /// `host.docker.internal:9092` (container network) while the host connects
@@ -80,11 +80,11 @@ fn write_election_fixture(name: &str, body: &str) {
 
 // ── broker ────────────────────────────────────────────────────────────────────
 
-async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir) {
+async fn start_host_broker() -> (krabka_broker::BrokerHandle, tempfile::TempDir) {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("crabka_broker=info,info")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("krabka_broker=info,info")),
         )
         .with_test_writer()
         .try_init();
@@ -96,15 +96,15 @@ async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir)
         listen_addr,
         advertised_listener: ADVERTISED.into(),
         log_dir: dir.path().to_path_buf(),
-        node_id: crabka_broker::NodeId(1),
+        node_id: krabka_broker::NodeId(1),
         controller_listen_addr: controller_addr,
-        controller_quorum_voters: vec![(crabka_broker::NodeId(1), controller_addr.to_string())],
+        controller_quorum_voters: vec![(krabka_broker::NodeId(1), controller_addr.to_string())],
         heartbeat_interval: secs(3),
         heartbeat_timeout: secs(9),
         replica_lag_time_max: secs(30),
         controller_election_timeout: secs(5),
         controller_heartbeat_interval: millis(500),
-        bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+        bootstrap_mode: krabka_broker::BootstrapMode::Bootstrap,
         ..BrokerConfig::default()
     };
     let handle = Broker::start(config).await.expect("start broker");
@@ -125,7 +125,7 @@ fn docker_pull(image: &str) {
 
 /// Start one cp-schema-registry node with a distinct `host_name` and a
 /// published REST port that maps an ephemeral host port to in-container `8081`.
-/// The node points at the shared Crabka broker and the shared election group.
+/// The node points at the shared Krabka broker and the shared election group.
 /// Returns the container id.
 ///
 /// `SCHEMA_REGISTRY_SCHEMA_REGISTRY_GROUP_ID` is cp's env var for the *election*
@@ -207,7 +207,7 @@ impl Drop for ContainerGuard {
 // ── REST readiness ──────────────────────────────────────────────────────────────
 
 /// Poll `GET {base}/subjects` until it returns 200 or the deadline passes. cp
-/// only serves this once the `"sr"` group has elected a master through Crabka,
+/// only serves this once the `"sr"` group has elected a master through Krabka,
 /// so a 200 proves the election round-tripped against our coordinator.
 async fn wait_for_registry(http: &reqwest::Client, base: &str, container_id: &str, label: &str) {
     let deadline = Instant::now() + Duration::from_mins(2);
@@ -378,7 +378,7 @@ async fn capture_election() {
         .build()
         .expect("build reqwest client");
 
-    // Readiness on BOTH nodes proves the `"sr"` group elected a master via Crabka.
+    // Readiness on BOTH nodes proves the `"sr"` group elected a master via Krabka.
     wait_for_registry(&http, &base1, &id1, "node-1").await;
     wait_for_registry(&http, &base2, &id2, "node-2").await;
 

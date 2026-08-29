@@ -8,12 +8,12 @@ use std::{
     sync::Arc,
 };
 
-use crabka_client_core::{
+use krabka_client_core::{
     ClientError, ClientSecurity, Connection, ConnectionOptions, DEFAULT_FETCH_RESPONSE_MAX,
     FetchMinBytes, IsolatedFetch, fetch_partition_with_isolation_progress,
 };
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-use crabka_units::prelude::*;
+use krabka_protocol::primitives::uuid::Uuid as WireUuid;
+use krabka_units::prelude::*;
 use parking_lot::RwLock;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -244,7 +244,7 @@ pub fn spawn(
 mod tests {
     use std::io;
 
-    use crabka_client_core::ClientError;
+    use krabka_client_core::ClientError;
 
     use super::*;
     use crate::{
@@ -305,7 +305,7 @@ mod tests {
             ),
             (
                 "timeout",
-                ClientError::Timeout(crabka_units::millis(1)),
+                ClientError::Timeout(krabka_units::millis(1)),
                 FetchErrorAction::Reconnect,
             ),
             (

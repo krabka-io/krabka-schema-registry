@@ -1,6 +1,6 @@
 //! Topic-ACL authorization for the registry REST surface.
 //!
-//! This module reuses Kafka's ACL model through `crabka-authz`. Each schema
+//! This module reuses Kafka's ACL model through `krabka-authz`. Each schema
 //! *subject* maps to a `ResourceType::Topic` ACL by subject name.
 //! Cluster-global operations map to `ResourceType::Cluster` name
 //! `"kafka-cluster"`. ACLs come from the broker's `DescribeAcls` into an
@@ -21,10 +21,10 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use crabka_authz::{AclCache, AuthorizationRequest, AuthorizationResult, Authorizer};
-use crabka_metadata::{AclOperation, ResourceType};
-use crabka_security::Principal;
-use crabka_units::prelude::*;
+use krabka_authz::{AclCache, AuthorizationRequest, AuthorizationResult, Authorizer};
+use krabka_metadata::{AclOperation, ResourceType};
+use krabka_security::Principal;
+use krabka_units::prelude::*;
 use tokio_util::sync::CancellationToken;
 
 /// The `ResourceType::Cluster` resource name for cluster-global operations,
@@ -140,7 +140,7 @@ pub fn authz_target(method: &Method, path: &str) -> Option<(ResourceType, String
 
 /// Topic-ACL authorization decision point for the registry.
 ///
-/// It holds the [`Authorizer`], which is a `crabka-authz` evaluator, and an
+/// It holds the [`Authorizer`], which is a `krabka-authz` evaluator, and an
 /// `ArcSwap`'d [`AclCache`] that [`Self::run_acl_refresh`] refreshes from the
 /// broker's `DescribeAcls`. It mirrors `grpc-gateway`'s `GatewayAuthz`.
 pub struct SchemaRegistryAuthz {
@@ -155,12 +155,12 @@ impl SchemaRegistryAuthz {
     /// request is allowed, which is the authz-disabled default. The
     /// super-user bypass is enforced both by the name short-circuit in
     /// [`Self::authorize`] and by the underlying
-    /// [`crabka_authz::SimpleAclAuthorizer`], which is constructed with the
+    /// [`krabka_authz::SimpleAclAuthorizer`], which is constructed with the
     /// same set.
     #[must_use]
     pub fn new(super_users: HashSet<String>, enabled: bool) -> Self {
         let authorizer: Arc<dyn Authorizer> =
-            Arc::new(crabka_authz::SimpleAclAuthorizer::new(super_users.clone()));
+            Arc::new(krabka_authz::SimpleAclAuthorizer::new(super_users.clone()));
         Self {
             authorizer,
             cache: ArcSwap::from_pointee(AclCache::default()),
@@ -174,13 +174,13 @@ impl SchemaRegistryAuthz {
     /// warning.
     pub async fn run_acl_refresh(
         &self,
-        mut admin: crabka_client_admin::AdminClient,
+        mut admin: krabka_client_admin::AdminClient,
         refresh: Time,
         shutdown: CancellationToken,
     ) {
         loop {
             match admin
-                .describe_acls(&crabka_client_admin::AclEntryFilter::default())
+                .describe_acls(&krabka_client_admin::AclEntryFilter::default())
                 .await
             {
                 Ok(entries) => {
@@ -228,15 +228,15 @@ impl SchemaRegistryAuthz {
     }
 }
 
-/// Convert a `crabka_client_admin::AclEntry` into a `crabka_metadata::AclEntry`.
+/// Convert a `krabka_client_admin::AclEntry` into a `krabka_metadata::AclEntry`.
 /// The admin crate keeps a structurally identical local copy, with the same
 /// field names and enum variants, to avoid a broker dependency. This function
 /// maps between them.
-fn acl_entry_from_admin(e: crabka_client_admin::AclEntry) -> crabka_metadata::AclEntry {
-    use crabka_client_admin::{
+fn acl_entry_from_admin(e: krabka_client_admin::AclEntry) -> krabka_metadata::AclEntry {
+    use krabka_client_admin::{
         AclOperation as AO, PatternType as PT, PermissionType as Perm, ResourceType as RT,
     };
-    use crabka_metadata::{
+    use krabka_metadata::{
         AclEntry as ME, AclOperation as MAO, PatternType as MPT, PermissionType as MPerm,
         ResourceType as MRT,
     };
@@ -359,25 +359,25 @@ mod tests {
     fn acl_entry_from_admin_maps_two_phase_commit() {
         // KIP-939: the admin→metadata ACL conversion must carry TwoPhaseCommit
         // through (it is the operation a 2PC grant on a TransactionalId uses).
-        let admin = crabka_client_admin::AclEntry {
-            resource_type: crabka_client_admin::ResourceType::TransactionalId,
+        let admin = krabka_client_admin::AclEntry {
+            resource_type: krabka_client_admin::ResourceType::TransactionalId,
             resource_name: "my-txn".into(),
-            pattern_type: crabka_client_admin::PatternType::Literal,
+            pattern_type: krabka_client_admin::PatternType::Literal,
             principal: "User:flink".into(),
             host: "*".into(),
-            operation: crabka_client_admin::AclOperation::TwoPhaseCommit,
-            permission_type: crabka_client_admin::PermissionType::Allow,
+            operation: krabka_client_admin::AclOperation::TwoPhaseCommit,
+            permission_type: krabka_client_admin::PermissionType::Allow,
         };
         let meta = acl_entry_from_admin(admin);
         assert2::assert!(
-            meta == crabka_metadata::AclEntry {
-                resource_type: crabka_metadata::ResourceType::TransactionalId,
+            meta == krabka_metadata::AclEntry {
+                resource_type: krabka_metadata::ResourceType::TransactionalId,
                 resource_name: "my-txn".to_string(),
-                pattern_type: crabka_metadata::PatternType::Literal,
+                pattern_type: krabka_metadata::PatternType::Literal,
                 principal: "User:flink".to_string(),
                 host: "*".to_string(),
-                operation: crabka_metadata::AclOperation::TwoPhaseCommit,
-                permission_type: crabka_metadata::PermissionType::Allow,
+                operation: krabka_metadata::AclOperation::TwoPhaseCommit,
+                permission_type: krabka_metadata::PermissionType::Allow,
             }
         );
     }
@@ -560,7 +560,7 @@ mod tests {
 
     // ---- SchemaRegistryAuthz::authorize ----------------------------------
 
-    use crabka_metadata::{AclEntry, PatternType, PermissionType};
+    use krabka_metadata::{AclEntry, PatternType, PermissionType};
 
     fn host() -> SocketAddr {
         "0.0.0.0:0".parse().unwrap()
@@ -582,7 +582,7 @@ mod tests {
     fn alice() -> Principal {
         Principal {
             name: "alice".into(),
-            auth_method: crabka_security::AuthMethod::SaslPlain,
+            auth_method: krabka_security::AuthMethod::SaslPlain,
             groups: vec![],
         }
     }

@@ -1,9 +1,9 @@
-# Crabka Schema Registry — Slice 3: deletes, modes, lookups — design
+# Krabka Schema Registry — Slice 3: deletes, modes, lookups — design
 
 - **Date:** 2026-06-05
 - **Status:** Approved (brainstorm); ready for an implementation plan
 - **Builds on:** slices 1+2+2b+2c (registry + full compatibility trilogy, all merged-pending). The store, `_schemas` record types, `KafkaStore` facade (write-gate + read-your-writes), compat engine, and axum REST surface all exist. Stacks on slice 2c (PR #400) for the shared store/record/REST/test files.
-- **Parent roadmap:** `docs/superpowers/specs/2026-06-04-crabka-schema-registry-design.md` (slice 3).
+- **Parent roadmap:** `docs/superpowers/specs/2026-06-04-krabka-schema-registry-design.md` (slice 3).
 
 ## Motivation
 

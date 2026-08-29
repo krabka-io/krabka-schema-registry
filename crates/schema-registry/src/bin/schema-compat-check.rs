@@ -6,7 +6,7 @@ use std::{
 };
 
 use clap::Parser;
-use crabka_schema_registry::format::{self, ResolvedReference, SchemaType};
+use krabka_schema_registry::format::{self, ResolvedReference, SchemaType};
 use prost_reflect::{
     prost::Message,
     prost_types::{FileDescriptorProto, FileDescriptorSet},
@@ -14,7 +14,7 @@ use prost_reflect::{
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "crabka-schema-compat-check",
+    name = "krabka-schema-compat-check",
     version,
     about = "Fail if a new protobuf FileDescriptorSet is backward-incompatible with an old one"
 )]

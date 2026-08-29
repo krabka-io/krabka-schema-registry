@@ -2,8 +2,8 @@
 //! returns the produced offset for read-your-writes gating.
 
 use bytes::Bytes;
-use crabka_client_core::ClientSecurity;
-use crabka_client_producer::{Acks, ConsumerGroupMetadata, Producer, ProducerRecord};
+use krabka_client_core::ClientSecurity;
+use krabka_client_producer::{Acks, ConsumerGroupMetadata, Producer, ProducerRecord};
 use tokio::sync::Mutex;
 
 use crate::config::RegistryConfig;
@@ -43,7 +43,7 @@ impl SchemaWriter {
         let fenced_producer = Producer::builder()
             .bootstrap(cfg.bootstrap.clone())
             .client_id(format!("{}-fenced-writer", cfg.client_id))
-            .transactional_id(format!("crabka-schema-registry-{}", cfg.group_id))
+            .transactional_id(format!("krabka-schema-registry-{}", cfg.group_id))
             .dispatch_queue_capacity(cfg.runtime.client_dispatch_queue_capacity.get())
             .frame_max(cfg.runtime.client_frame_max.size())
             .enable_idempotence(true)

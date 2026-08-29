@@ -2,13 +2,13 @@
 
 These files are **byte-exact golden fixtures**. They were captured from a real
 [`mirror.gcr.io/confluentinc/cp-schema-registry`](https://hub.docker.com/r/confluentinc/cp-schema-registry)
-that ran against an in-process Crabka broker. They are the oracle for the Crabka
+that ran against an in-process Krabka broker. They are the oracle for the Krabka
 Schema Registry implementation. Do **not** hand-edit them.
 
 ## Provenance
 
 - **Image:** `mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0`
-- **Broker:** in-process `crabka-broker`. It listens on `0.0.0.0:9092` and
+- **Broker:** in-process `krabka-broker`. It listens on `0.0.0.0:9092` and
   advertises `host.docker.internal:9092`. The container reaches it with
   `--add-host=host.docker.internal:host-gateway`.
 - **Captured:** 2026-06-05
@@ -16,7 +16,7 @@ Schema Registry implementation. Do **not** hand-edit them.
   (`#[ignore]`). Regenerate with:
 
   ```text
-  cargo test -p crabka-schema-registry --test capture_fixtures -- --ignored --nocapture
+  cargo test -p krabka-schema-registry --test capture_fixtures -- --ignored --nocapture
   ```
 
 ## Schemas registered
@@ -60,7 +60,7 @@ Each file wraps the error as
 
 There is one file per record in `_schemas` partition 0: `schemas_record_0.json`,
 `schemas_record_1.json`, and so on. The harness captured them directly off the
-Crabka broker, **in offset order**. Each file is `{"key": <utf8 of key bytes or
+Krabka broker, **in offset order**. Each file is `{"key": <utf8 of key bytes or
 null>, "value": <utf8 of value bytes or null>}`. The embedded key and value
 strings are the verbatim JSON that cp-schema-registry wrote to the log. These
 files drive the kafkastore record encode/decode validation.

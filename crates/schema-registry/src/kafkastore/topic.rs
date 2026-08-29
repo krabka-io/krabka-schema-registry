@@ -4,10 +4,10 @@
 
 use std::collections::BTreeMap;
 
-use crabka_client_admin::{AdminClient, CreateTopicSpec};
-use crabka_client_core::ClientSecurity;
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-use crabka_units::prelude::*;
+use krabka_client_admin::{AdminClient, CreateTopicSpec};
+use krabka_client_core::ClientSecurity;
+use krabka_protocol::primitives::uuid::Uuid as WireUuid;
+use krabka_units::prelude::*;
 
 use crate::config::RegistryConfig;
 
@@ -47,11 +47,11 @@ pub async fn ensure_schemas_topic(
         .collect();
     let mut admin = AdminClient::connect_with_options(
         &bootstrap,
-        crabka_client_core::ConnectionOptions {
-            dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
-            connect_timeout: crabka_units::secs(5),
-            request_timeout: crabka_units::secs(30),
-            client_id: "crabka-operator".to_owned(),
+        krabka_client_core::ConnectionOptions {
+            dns_timeout: krabka_client_core::ClientDnsTimeout::default(),
+            connect_timeout: krabka_units::secs(5),
+            request_timeout: krabka_units::secs(30),
+            client_id: "krabka-operator".to_owned(),
             dispatch_queue_capacity: cfg.runtime.client_dispatch_queue_capacity,
             frame_max: cfg.runtime.client_frame_max,
             security: security.map(Box::new),
@@ -89,7 +89,7 @@ fn to_wire_uuid(id: uuid::Uuid) -> WireUuid {
 
 #[cfg(test)]
 mod tests {
-    use crabka_units::prelude::*;
+    use krabka_units::prelude::*;
 
     use super::{schemas_topic_spec, to_wire_uuid};
     use crate::config::{RegistryConfig, RegistryRuntimeConfig, SecurityConfig};

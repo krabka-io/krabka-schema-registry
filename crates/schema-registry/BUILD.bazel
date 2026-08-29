@@ -8,23 +8,23 @@ exports_files(["Cargo.toml"])
 crate_library(name = "schema-registry")
 
 # The registry server.
-# `bazel run //crates/schema-registry:crabka-schema-registry -- --help`.
+# `bazel run //crates/schema-registry:krabka-schema-registry -- --help`.
 crate_binary(
-    name = "crabka-schema-registry",
+    name = "krabka-schema-registry",
     crate_root = "src/bin/schema-registry.rs",
     lib = ":schema-registry",
 )
 
 # Registers a schema file under a subject.
 crate_binary(
-    name = "crabka-schema-push",
+    name = "krabka-schema-push",
     crate_root = "src/bin/schema-push.rs",
     lib = ":schema-registry",
 )
 
 # Checks a schema against a subject's history without registering it.
 crate_binary(
-    name = "crabka-schema-compat-check",
+    name = "krabka-schema-compat-check",
     crate_root = "src/bin/schema-compat-check.rs",
     lib = ":schema-registry",
 )

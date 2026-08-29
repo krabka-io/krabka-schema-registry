@@ -1,6 +1,6 @@
 //! In-process integration of the registry security stack against a real broker.
 //!
-//! Boots a Crabka `Broker` and seeds Kafka ACLs that Allow `User:alice` Write
+//! Boots a Krabka `Broker` and seeds Kafka ACLs that Allow `User:alice` Write
 //! and Read on `Topic:s`. It then starts secure registry nodes wired with the
 //! full middleware stack: `auth_layer` with require Basic, then `authz_layer`
 //! enabled and refreshed from the broker's `DescribeAcls`, then
@@ -26,11 +26,11 @@ use std::{
 
 use axum::Router;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD as B64};
-use crabka_broker::{Broker, BrokerConfig};
-use crabka_client_admin::{
+use krabka_broker::{Broker, BrokerConfig};
+use krabka_client_admin::{
     AclEntry, AclOperation, AdminClient, PatternType, PermissionType, ResourceType,
 };
-use crabka_schema_registry::{
+use krabka_schema_registry::{
     auth::{AuthState, basic::BasicAuthStore},
     authz::SchemaRegistryAuthz,
     cli::{SecurityCliInput, build_security},
@@ -39,11 +39,11 @@ use crabka_schema_registry::{
     kafkastore::KafkaStore,
     rest::{self, AppState, SecurityLayers, forward::ForwardState},
 };
-use crabka_security::{
+use krabka_security::{
     ClientAuthMode, Jwks, TlsConfig,
     ca::{SubjectAltName, generate_clients_ca, issue_broker_cert, issue_user_cert},
 };
-use crabka_units::prelude::*;
+use krabka_units::prelude::*;
 use tokio_util::sync::CancellationToken;
 
 const SR_CONTENT_TYPE: &str = "application/vnd.schemaregistry.v1+json";
@@ -73,7 +73,7 @@ fn secure_cfg_with_scheme(
         advertised_url: format!("{scheme}://127.0.0.1:{port}"),
         group_id: "schema-registry".into(),
         leader_eligibility: true,
-        runtime: crabka_schema_registry::config::RegistryRuntimeConfig::default(),
+        runtime: krabka_schema_registry::config::RegistryRuntimeConfig::default(),
         security: SecurityConfig {
             require_auth: true,
             realm: "test".into(),
@@ -496,7 +496,7 @@ async fn https_round_trip_enforces_auth_over_tls() {
         private_key_path: key_path,
         trust_roots_path: None,
         client_ca_path: None,
-        client_auth: crabka_security::ClientAuthMode::Disabled,
+        client_auth: krabka_security::ClientAuthMode::Disabled,
     };
 
     // Boot a node serving HTTPS. Listener bound first for the real port.
@@ -807,7 +807,7 @@ async fn start_jwks_node(
         advertised_url: format!("http://127.0.0.1:{port}"),
         group_id: "schema-registry".into(),
         leader_eligibility: true,
-        runtime: crabka_schema_registry::config::RegistryRuntimeConfig::default(),
+        runtime: krabka_schema_registry::config::RegistryRuntimeConfig::default(),
         security: out.config,
     };
     let cancel = CancellationToken::new();

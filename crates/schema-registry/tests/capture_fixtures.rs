@@ -1,14 +1,14 @@
-//! Golden-fixture capture harness for the Crabka Schema Registry slice.
+//! Golden-fixture capture harness for the Krabka Schema Registry slice.
 //!
 //! This test stands up a **real** `mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0`
-//! container pointed at an in-process Crabka broker, registers a handful of
+//! container pointed at an in-process Krabka broker, registers a handful of
 //! AVRO / PROTOBUF / JSON schemas through the official REST API, and captures
 //! the byte-exact REST responses **and** the raw `_schemas` Kafka log records
 //! that cp-schema-registry writes. Those captures become the byte-exact oracle
 //! the later schema-registry tasks are validated against, so accuracy matters
 //! more than speed.
 //!
-//! Networking mirrors `crates/broker/tests/jvm_acceptance.rs`: the Crabka
+//! Networking mirrors `crates/broker/tests/jvm_acceptance.rs`: the Krabka
 //! broker listens on `0.0.0.0:9092` and advertises `host.docker.internal:9092`.
 //! The container is launched with `--add-host=host.docker.internal:host-gateway`
 //! so the JVM Kafka client inside it can reach the host broker, while the
@@ -18,7 +18,7 @@
 //! Gated `#[ignore]` so `cargo test --workspace` never pulls Docker. Run with:
 //!
 //! ```text
-//! cargo test -p crabka-schema-registry --test capture_fixtures -- --ignored --nocapture
+//! cargo test -p krabka-schema-registry --test capture_fixtures -- --ignored --nocapture
 //! ```
 //!
 //! The fixtures it writes live under `tests/fixtures/`; re-running this test
@@ -35,11 +35,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crabka_broker::{Broker, BrokerConfig, NodeId};
-use crabka_client_admin::AdminClient;
-use crabka_client_core::{Connection, ConnectionOptions, fetch_partition};
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-use crabka_units::prelude::*;
+use krabka_broker::{Broker, BrokerConfig, NodeId};
+use krabka_client_admin::AdminClient;
+use krabka_client_core::{Connection, ConnectionOptions, fetch_partition};
+use krabka_protocol::primitives::uuid::Uuid as WireUuid;
+use krabka_units::prelude::*;
 
 /// The broker binds host port 9092, which [`LISTEN`] embeds.
 /// cp-schema-registry's Kafka client reaches it at `host.docker.internal:9092`,
@@ -76,13 +76,13 @@ fn write_fixture(name: &str, body: &str) {
 
 // ── broker ───────────────────────────────────────────────────────────────────
 
-/// Spawn an in-process Crabka broker on `0.0.0.0:9092` advertising
+/// Spawn an in-process Krabka broker on `0.0.0.0:9092` advertising
 /// `host.docker.internal:9092`, mirroring `jvm_acceptance.rs`.
-async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir) {
+async fn start_host_broker() -> (krabka_broker::BrokerHandle, tempfile::TempDir) {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("crabka_broker=info,info")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("krabka_broker=info,info")),
         )
         .with_test_writer()
         .try_init();
@@ -102,7 +102,7 @@ async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir)
         replica_lag_time_max: secs(30),
         controller_election_timeout: secs(5),
         controller_heartbeat_interval: millis(500),
-        bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+        bootstrap_mode: krabka_broker::BootstrapMode::Bootstrap,
         ..BrokerConfig::default()
     };
     let handle = Broker::start(config).await.expect("start broker");
@@ -331,8 +331,8 @@ async fn capture_schemas_log(topic_id: WireUuid) {
             topic_id,
             0,
             next_offset,
-            crabka_units::secs(1),
-            crabka_units::mebibytes(1),
+            krabka_units::secs(1),
+            krabka_units::mebibytes(1),
         )
         .await
         .expect("fetch _schemas");

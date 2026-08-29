@@ -1,5 +1,5 @@
 //! HTTP Basic credential store. It is the only new auth primitive, and the rest
-//! reuses `crabka-security`. A plaintext credential gives cp
+//! reuses `krabka-security`. A plaintext credential gives cp
 //! `PropertyFileLoginModule` parity. A `$2…` value is bcrypt-verified.
 use std::collections::HashMap;
 
@@ -103,7 +103,7 @@ mod tests {
         // Inline (CLI/config) is more explicit and must win the conflict.
         let dir = std::env::temp_dir();
         let path = dir.join(format!(
-            "crabka-sr-basic-auth-{}.htpasswd",
+            "krabka-sr-basic-auth-{}.htpasswd",
             std::process::id()
         ));
         std::fs::write(&path, "# comment\n\nalice:filepw\nbob:bobpw\n").unwrap();
@@ -133,7 +133,7 @@ mod tests {
         // colon-less malformed line are all skipped; valid `user:cred` lines load.
         let dir = std::env::temp_dir();
         let path = dir.join(format!(
-            "crabka-sr-basic-parse-{}.htpasswd",
+            "krabka-sr-basic-parse-{}.htpasswd",
             std::process::id()
         ));
         std::fs::write(
@@ -166,7 +166,7 @@ mod tests {
         let cfg = crate::config::BasicAuthConfig {
             users: HashMap::new(),
             file: Some(std::path::PathBuf::from(
-                "/nonexistent/crabka-sr-basic-missing.htpasswd",
+                "/nonexistent/krabka-sr-basic-missing.htpasswd",
             )),
         };
         let err = BasicAuthStore::load(&cfg).expect_err("missing file must error");

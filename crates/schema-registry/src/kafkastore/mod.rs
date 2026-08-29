@@ -105,7 +105,7 @@ impl KafkaStore {
 
     async fn prepare_write(
         &self,
-    ) -> Result<Option<crabka_client_producer::ConsumerGroupMetadata>, SrError> {
+    ) -> Result<Option<krabka_client_producer::ConsumerGroupMetadata>, SrError> {
         let Some(primary) = self.primary.read().clone() else {
             return Ok(None);
         };
@@ -138,7 +138,7 @@ impl KafkaStore {
                 "primary election changed while synchronizing the schema store".into(),
             ));
         }
-        Ok(Some(crabka_client_producer::ConsumerGroupMetadata {
+        Ok(Some(krabka_client_producer::ConsumerGroupMetadata {
             group_id: self.election_group.clone(),
             generation_id,
             member_id,

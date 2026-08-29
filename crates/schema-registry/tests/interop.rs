@@ -3,7 +3,7 @@
 //! wrote, and that our REST router returns the same schema through `GET`.
 //!
 //! Mirrors the setup in `capture_fixtures.rs`:
-//! - A Crabka broker binds `0.0.0.0:9092`, advertises `host.docker.internal:9092`.
+//! - A Krabka broker binds `0.0.0.0:9092`, advertises `host.docker.internal:9092`.
 //! - cp-schema-registry connects to it via Docker's `--add-host` gateway.
 //! - We register an Avro schema through cp's REST endpoint.
 //! - Then we start OUR `KafkaStore` (which replays the `_schemas` topic that cp wrote)
@@ -12,7 +12,7 @@
 //! Gated `#[ignore]` so `cargo test --workspace` never needs Docker. Run with:
 //!
 //! ```text
-//! cargo test -p crabka-schema-registry --test interop -- --ignored --nocapture
+//! cargo test -p krabka-schema-registry --test interop -- --ignored --nocapture
 //! ```
 //!
 //! The test tears down the container on both success and failure, through
@@ -25,13 +25,13 @@ use std::{
 };
 
 use axum::{body::Body, http::Request};
-use crabka_broker::{Broker, BrokerConfig};
-use crabka_schema_registry::{
+use krabka_broker::{Broker, BrokerConfig};
+use krabka_schema_registry::{
     config::{RegistryConfig, SecurityConfig},
     kafkastore::KafkaStore,
     rest::{self, AppState},
 };
-use crabka_units::prelude::*;
+use krabka_units::prelude::*;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
@@ -47,11 +47,11 @@ const SR_CONTENT_TYPE: &str = "application/vnd.schemaregistry.v1+json";
 
 // ── broker ────────────────────────────────────────────────────────────────────
 
-async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir) {
+async fn start_host_broker() -> (krabka_broker::BrokerHandle, tempfile::TempDir) {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("crabka_broker=info,info")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("krabka_broker=info,info")),
         )
         .with_test_writer()
         .try_init();
@@ -63,15 +63,15 @@ async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir)
         listen_addr,
         advertised_listener: ADVERTISED.into(),
         log_dir: dir.path().to_path_buf(),
-        node_id: crabka_broker::NodeId(1),
+        node_id: krabka_broker::NodeId(1),
         controller_listen_addr: controller_addr,
-        controller_quorum_voters: vec![(crabka_broker::NodeId(1), controller_addr.to_string())],
+        controller_quorum_voters: vec![(krabka_broker::NodeId(1), controller_addr.to_string())],
         heartbeat_interval: secs(3),
         heartbeat_timeout: secs(9),
         replica_lag_time_max: secs(30),
         controller_election_timeout: secs(5),
         controller_heartbeat_interval: millis(500),
-        bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+        bootstrap_mode: krabka_broker::BootstrapMode::Bootstrap,
         ..BrokerConfig::default()
     };
     let handle = Broker::start(config).await.expect("start broker");
@@ -262,7 +262,7 @@ async fn our_store_decodes_cp_schema_registry_records() {
         advertised_url: "http://127.0.0.1:0".into(),
         group_id: "schema-registry".into(),
         leader_eligibility: true,
-        runtime: crabka_schema_registry::config::RegistryRuntimeConfig::default(),
+        runtime: krabka_schema_registry::config::RegistryRuntimeConfig::default(),
         security: SecurityConfig::default(),
     };
     let cancel = CancellationToken::new();

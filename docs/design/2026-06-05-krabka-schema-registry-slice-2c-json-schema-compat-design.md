@@ -1,9 +1,9 @@
-# Crabka Schema Registry — Slice 2c: JSON Schema compatibility (full Confluent parity) — design
+# Krabka Schema Registry — Slice 2c: JSON Schema compatibility (full Confluent parity) — design
 
 - **Date:** 2026-06-05
 - **Status:** Approved (brainstorm); ready for an implementation plan
 - **Builds on:** slice 2 (PR #395, merged) — the format-agnostic `compat` engine + the `format::check(ty, reader, writer)` seam + the golden-matrix-from-`cp-schema-registry` validation pattern. Stacks on slice 2b (PR #397; the shared conformance/integration test files), but the JSON rules are independent of the Protobuf rules.
-- **Parent roadmap:** `docs/superpowers/specs/2026-06-04-crabka-schema-registry-design.md` (slice 2c — the last of the three formats).
+- **Parent roadmap:** `docs/superpowers/specs/2026-06-04-krabka-schema-registry-design.md` (slice 2c — the last of the three formats).
 
 ## Motivation
 

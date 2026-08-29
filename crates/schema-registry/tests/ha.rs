@@ -1,8 +1,8 @@
 use std::{sync::Arc, time::Duration};
 
 use axum::Router;
-use crabka_broker::{Broker, BrokerConfig};
-use crabka_schema_registry::{
+use krabka_broker::{Broker, BrokerConfig};
+use krabka_schema_registry::{
     config::{RegistryConfig, SecurityConfig},
     election::{Election, PrimaryState},
     format::SchemaType,
@@ -20,7 +20,7 @@ fn cfg(bootstrap: &str, port: i32) -> RegistryConfig {
         advertised_url: format!("http://127.0.0.1:{port}"),
         group_id: "schema-registry".into(),
         leader_eligibility: true,
-        runtime: crabka_schema_registry::config::RegistryRuntimeConfig::default(),
+        runtime: krabka_schema_registry::config::RegistryRuntimeConfig::default(),
         security: SecurityConfig::default(),
     }
 }

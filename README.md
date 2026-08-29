@@ -20,16 +20,16 @@ suites run against.
 
 | Crate | What it is |
 | --- | --- |
-| `crabka-schema-registry` | The service: the Confluent REST API, the `_schemas` store, primary election, compatibility checking, auth and ACLs. Ships three binaries. |
-| `crabka-schema-serde` | The client side: the `0x00 \| id \| body` framing, the REST client, and the Avro, Protobuf and JSON-Schema serdes. |
+| `krabka-schema-registry` | The service: the Confluent REST API, the `_schemas` store, primary election, compatibility checking, auth and ACLs. Ships three binaries. |
+| `krabka-schema-serde` | The client side: the `0x00 \| id \| body` framing, the REST client, and the Avro, Protobuf and JSON-Schema serdes. |
 
 ### Binaries
 
 | Binary | What it does |
 | --- | --- |
-| `crabka-schema-registry` | The registry server. |
-| `crabka-schema-push` | Registers a schema file under a subject. |
-| `crabka-schema-compat-check` | Checks a schema against a subject's history without registering it. |
+| `krabka-schema-registry` | The registry server. |
+| `krabka-schema-push` | Registers a schema file under a subject. |
+| `krabka-schema-compat-check` | Checks a schema against a subject's history without registering it. |
 
 ## What it covers
 
@@ -79,7 +79,7 @@ concurrently.
 ## Sibling revisions
 
 Member manifests declare the sibling crates as ordinary
-`crabka-x = "0.4.0"` requirements. The `[patch.crates-io]` block at the bottom
+`krabka-x = "0.4.0"` requirements. The `[patch.crates-io]` block at the bottom
 of the root `Cargo.toml` is the single place a sibling revision moves. To take a
 newer sibling, change the revision there, re-run `cargo generate-lockfile`, and
 commit both files.

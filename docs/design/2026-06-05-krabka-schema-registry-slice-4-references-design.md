@@ -1,9 +1,9 @@
-# Crabka Schema Registry — Slice 4: schema references — design
+# Krabka Schema Registry — Slice 4: schema references — design
 
 - **Date:** 2026-06-05
 - **Status:** Approved (brainstorm); ready for an implementation plan
 - **Builds on:** slices 1+2+2b+2c+3 (registry + full compatibility trilogy + deletes/modes/lookups). The store, `_schemas` records, `KafkaStore` facade, the format-agnostic `compat` engine + `format::check` seam, and the axum REST surface all exist. Stacks on slice 3 (PR #407).
-- **Parent roadmap:** `docs/superpowers/specs/2026-06-04-crabka-schema-registry-design.md` (slice 4).
+- **Parent roadmap:** `docs/superpowers/specs/2026-06-04-krabka-schema-registry-design.md` (slice 4).
 
 ## Motivation
 

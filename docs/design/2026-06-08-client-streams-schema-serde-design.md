@@ -5,14 +5,14 @@ Status: Approved design — ready for implementation planning
 
 ## Goal
 
-Let `crabka-client-streams` topologies read and write **schema-framed**
+Let `krabka-client-streams` topologies read and write **schema-framed**
 payloads in Avro, Protobuf, and JSON, with the schemas **registered and
 validated against a Confluent-compatible Schema Registry** (the existing
-`crabka-schema-registry` server). Ship runnable examples per format.
+`krabka-schema-registry` server). Ship runnable examples per format.
 
 The hard constraint is **Confluent wire-format byte-exactness** (magic byte
 `0x00` + 4-byte big-endian schema id, plus the Protobuf message-index prefix),
-so that data produced/consumed by Crabka interoperates with the JVM Confluent
+so that data produced/consumed by Krabka interoperates with the JVM Confluent
 serializers.
 
 ## Non-goals (YAGNI)
@@ -24,14 +24,14 @@ serializers.
 - No producer/consumer integration in this slice. The core crate is built to be
   reusable by `client-producer`/`client-consumer` later, but only the Streams
   bridge is wired now.
-- No backwards-compatibility shims (Crabka is greenfield/undeployed).
+- No backwards-compatibility shims (Krabka is greenfield/undeployed).
 
 ## Crate layout & boundaries
 
-### New crate: `crabka-schema-serde` (client-agnostic core)
+### New crate: `krabka-schema-serde` (client-agnostic core)
 
 Per-format Cargo features `avro` / `protobuf` / `json` so users pull only what
-they need. No dependency on `crabka-client-streams`.
+they need. No dependency on `krabka-client-streams`.
 
 ```
 crates/schema-serde/
@@ -84,9 +84,9 @@ in this slice).
   the common top-level case `[0]` to a single `0x00` byte. Both encode and
   decode handle this special case.
 
-### `crabka-client-streams` — optional feature `schema-serde`
+### `krabka-client-streams` — optional feature `schema-serde`
 
-- New optional dependency on `crabka-schema-serde`.
+- New optional dependency on `krabka-schema-serde`.
 - New module `processor::serde::schema` (gated by the feature) holding the
   **`Serde<T>` bridge impls**. The impls live here (not in the core crate) so the
   local `Serde<T>` trait is not orphan-implemented.
@@ -109,7 +109,7 @@ Notes:
   schema evolution resolves correctly, then `apache_avro::from_value::<T>`.
 - **Protobuf** registration normalizes the `FileDescriptorProto` to `.proto`
   text. Where practical, reuse the normalization conventions already in
-  `crabka-schema-registry::format::protobuf` to match cp output.
+  `krabka-schema-registry::format::protobuf` to match cp output.
 - **JSON** validation against the fetched writer schema is opt-in (the
   `jsonschema` crate); decode is `serde_json::from_slice::<T>`.
 
@@ -156,7 +156,7 @@ per-type doctests on the serde constructors.
 - **Unit round-trips** through each `SchemaSerializer`/`SchemaDeserializer`.
 - **Framing assertions**: magic `0x00`, 4-byte BE id; Protobuf message-index
   (incl. the `[0]`→single-byte special case).
-- **Registry client** tested against the in-workspace `crabka-schema-registry`
+- **Registry client** tested against the in-workspace `krabka-schema-registry`
   server spun up in-process (broker test-helpers already available as a
   dev-dependency).
 - **Golden cp bytes**: payloads captured from Confluent's JVM serializers

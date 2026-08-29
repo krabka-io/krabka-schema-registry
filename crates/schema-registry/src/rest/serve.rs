@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use axum::Router;
-use crabka_security::{AuthMethod, Principal, TlsConfig};
+use krabka_security::{AuthMethod, Principal, TlsConfig};
 use hyper_util::rt::TokioIo;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
@@ -45,7 +45,7 @@ pub async fn serve_http(
 /// `shutdown` is cancelled.
 ///
 /// # Errors
-/// Propagates [`crabka_security::TlsError`] if the server config fails to build,
+/// Propagates [`krabka_security::TlsError`] if the server config fails to build,
 /// or the `std::io` error from binding the accept loop.
 pub async fn serve_https(
     listener: TcpListener,
@@ -120,7 +120,7 @@ async fn serve_tls(
 fn peer_principal(tls: &tokio_rustls::server::TlsStream<TcpStream>) -> Option<Principal> {
     let (_, conn) = tls.get_ref();
     let cert = conn.peer_certificates()?.first()?;
-    let name = crabka_security::extract_principal_from_cert(cert.as_ref())?;
+    let name = krabka_security::extract_principal_from_cert(cert.as_ref())?;
     Some(Principal {
         name,
         auth_method: AuthMethod::MTls,

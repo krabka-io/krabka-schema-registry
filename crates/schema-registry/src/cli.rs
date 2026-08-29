@@ -13,15 +13,15 @@ use std::{
     sync::Arc,
 };
 
-use crabka_client_core::{
+use krabka_client_core::{
     ClientSecurity,
     security::{SaslCredentials, TlsConnectorConfig},
 };
-use crabka_security::{
+use krabka_security::{
     ClientAuthMode, Jwks, JwksHandle, ListenerProtocol, OAuthBearerValidator, SaslMechanism,
     SignedJwsValidator, TlsConfig,
 };
-use crabka_units::prelude::*;
+use krabka_units::prelude::*;
 
 use crate::config::{
     AuthzConfig, BasicAuthConfig, BearerAuthConfig, DEFAULT_ACL_REFRESH, SecurityConfig,
@@ -191,7 +191,7 @@ fn build_bearer(
         "off" => Ok((None, None)),
         "unsecured" => {
             let validator =
-                OAuthBearerValidator::Unsecured(crabka_security::UnsecuredJwsValidator {
+                OAuthBearerValidator::Unsecured(krabka_security::UnsecuredJwsValidator {
                     principal_claim_name: input.bearer_principal_claim.clone(),
                     ..Default::default()
                 });
