@@ -90,6 +90,7 @@ list, and every sibling's `members` is the glob `crates/*`, which it skips.
 
 ## Documentation
 
+- [Roadmap](docs/roadmap.md)
 - [Deployment](docs/deploy.md)
 - [Design documents](docs/design/)
 - [Style guides](docs/style_guides/README.md)
