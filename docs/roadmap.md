@@ -39,7 +39,7 @@ The end state is a registry where executable fixtures hold the Confluent contrac
 **Exit criteria.**
 
 - Every path and method pair registered in `crates/schema-registry/src/rest/mod.rs:96-152` either maps to an authz target or appears, with a reason, in the unmapped-route test.
-- No response from the service, from a handler, middleware, the router fallback or an extractor rejection, has a body that fails to parse as `{"error_code": N, "message": "..."}`, and all carry `application/vnd.schemaregistry.v1+json`.
+- No error response from the service, from a handler, middleware, the router fallback or an extractor rejection, has a body that fails to parse as `{"error_code": N, "message": "..."}`. A success response keeps its Confluent body shape. Every response, of either kind, carries `application/vnd.schemaregistry.v1+json`.
 - A request that forges the inter-node forwarding header against a node started with `--require-auth --authz` is rejected.
 - `cargo test -p krabka-schema-registry --test security` passes with the new deny cases.
 
@@ -178,7 +178,7 @@ The end state is a registry where executable fixtures hold the Confluent contrac
 
 **Backwards compatibility work.** krabka is greenfield and undeployed. There are no production users, no persisted state to migrate, and no clients pinned to a build. This roadmap adds no migration code, no `V2` variants kept beside `V1`, no `#[serde(default)]` for old raft logs, no default-off feature flags, and no deprecated API surface. When a record shape or an interface changes, it changes, and a developer deletes the local data directory.
 
-**Divergence from Confluent.** No item here adds an endpoint, a header, a query parameter or an error code that `cp-schema-registry` does not define. Every rule that M3, M4 and M5 add carries a verdict or a body captured from the container first. Where cp's behavior cannot be reproduced, the suite records the exception instead of a hand-written expectation.
+**Divergence from Confluent.** No item here adds an endpoint, a header, a query parameter or an error code to the client-facing listener that `cp-schema-registry` does not define. The admin listener is a separate surface that no Confluent client reaches, and the operational endpoints M7 adds there, `/metrics` and `/readyz`, are outside this constraint. Every rule that M3, M4 and M5 add carries a verdict or a body captured from the container first. Where cp's behavior cannot be reproduced, the suite records the exception instead of a hand-written expectation.
 
 **Packaging.** The Helm chart, the apko image definition and the operator's `SchemaRegistry` CRD stay in [`robot-head/crabka`](https://github.com/robot-head/crabka). The CRD belongs to that repository's operator crate, and the operator is not moving. M7 states where they live and links to them. It does not copy them here.
 
