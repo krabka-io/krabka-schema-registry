@@ -90,7 +90,9 @@ with network policy or mTLS.
 Basic authentication accepts Confluent password-property entries such as
 `alice: pw,admin`. Set permitted roles with `SCHEMA_REGISTRY_AUTH_ROLES`, and
 provide inline users and authorization super-users with
-`SCHEMA_REGISTRY_BASIC_USERS` and `SCHEMA_REGISTRY_SUPER_USERS`. For broker
+`SCHEMA_REGISTRY_BASIC_USERS` and `SCHEMA_REGISTRY_SUPER_USERS`; separate
+multiple entries with newlines so commas remain valid in roles and certificate
+subjects. `SCHEMA_REGISTRY_AUTH_ROLES=*` accepts any declared role. For broker
 SASL, mount the password and set `SCHEMA_REGISTRY_KAFKA_SASL_PASSWORD_FILE`.
 
 The profiling admin listener binds to `127.0.0.1:9404` by default. Set

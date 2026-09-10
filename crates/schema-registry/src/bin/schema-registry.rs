@@ -202,7 +202,8 @@ struct Args {
     #[arg(
         long = "basic-user",
         env = "SCHEMA_REGISTRY_BASIC_USERS",
-        value_name = "USER:CRED"
+        value_name = "USER:CRED",
+        value_delimiter = '\n'
     )]
     basic_users: Vec<String>,
     /// Role permitted to authenticate with Basic (repeatable).
@@ -278,7 +279,7 @@ struct Args {
         long = "super-user",
         env = "SCHEMA_REGISTRY_SUPER_USERS",
         value_name = "NAME",
-        value_delimiter = ','
+        value_delimiter = '\n'
     )]
     super_users: Vec<String>,
     /// ACL-cache refresh interval, with a unit (`30s`).
@@ -761,9 +762,15 @@ mod tests {
         std::fs::write(file.path(), "broker-secret\n").unwrap();
         temp_env::with_vars(
             [
-                ("SCHEMA_REGISTRY_BASIC_USERS", Some("alice:pw,admin")),
+                (
+                    "SCHEMA_REGISTRY_BASIC_USERS",
+                    Some("alice:pw,admin\nbob:other,user"),
+                ),
                 ("SCHEMA_REGISTRY_AUTH_ROLES", Some("admin,developer")),
-                ("SCHEMA_REGISTRY_SUPER_USERS", Some("root,operator")),
+                (
+                    "SCHEMA_REGISTRY_SUPER_USERS",
+                    Some("root\nCN=operator,O=Example"),
+                ),
                 (
                     "SCHEMA_REGISTRY_KAFKA_SASL_PASSWORD_FILE",
                     file.path().to_str(),
@@ -777,9 +784,9 @@ mod tests {
                     "--kafka-sasl-username=registry",
                 ])
                 .unwrap();
-                assert!(args.basic_users == ["alice:pw,admin"]);
+                assert!(args.basic_users == ["alice:pw,admin", "bob:other,user"]);
                 assert!(args.auth_roles == ["admin", "developer"]);
-                assert!(args.super_users == ["root", "operator"]);
+                assert!(args.super_users == ["root", "CN=operator,O=Example"]);
                 assert!(args.kafka_sasl_password_file.as_deref() == Some(file.path()));
                 let client = build_security(&args.security_input())
                     .unwrap()

@@ -94,13 +94,13 @@ impl BasicAuthStore {
         } else {
             constant_time_eq(stored.credential.as_bytes(), pass.as_bytes())
         };
-        if !credential_matches
-            || (!self.required_roles.is_empty()
-                && !stored
-                    .roles
-                    .iter()
-                    .any(|role| self.required_roles.contains(role)))
-        {
+        let role_matches = self.required_roles.is_empty()
+            || stored
+                .roles
+                .iter()
+                .any(|role| self.required_roles.contains(role))
+            || (self.required_roles.contains("*") && !stored.roles.is_empty());
+        if !credential_matches || !role_matches {
             return None;
         }
         Some(&stored.roles)
@@ -244,6 +244,11 @@ mod tests {
             required_roles: ["admin".to_owned()].into_iter().collect(),
         };
         let store = BasicAuthStore::load(&cfg).unwrap();
+        let wildcard_store = BasicAuthStore::load(&crate::config::BasicAuthConfig {
+            required_roles: ["*".to_owned()].into_iter().collect(),
+            ..cfg.clone()
+        })
+        .unwrap();
         std::fs::remove_file(path).ok();
 
         for (user, password, expected) in [
@@ -257,6 +262,7 @@ mod tests {
             store.authenticate("alice", "pw").unwrap()
                 == ["admin".to_owned(), "developer".to_owned()]
         );
+        assert2::assert!(wildcard_store.verify("bob", "other"));
         assert2::assert!(format!("{store:?}") == "BasicAuthStore");
     }
 }
