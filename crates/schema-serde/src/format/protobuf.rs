@@ -51,8 +51,10 @@ impl<T: ReflectMessage + Default> ProtobufSerde<T> {
     fn make(cache: &Arc<SchemaCache>, role: Role) -> Self {
         let descriptor = T::default().descriptor();
         let proto_text = proto_source(&descriptor);
-        let message_index = message_index(&descriptor)
-            .expect("a message descriptor is reachable from its parent file");
+        let normalized = protox_parse::parse("schema.proto", &proto_text)
+            .expect("normalized protobuf schema is valid");
+        let message_index = message_index_in_proto(&normalized, descriptor.full_name())
+            .expect("a message descriptor is reachable in its normalized schema");
         Self {
             binding: Binding {
                 cache: Arc::clone(cache),
@@ -219,7 +221,7 @@ fn write_message(
         format!("{parent_name}.{name}")
     };
     let indent = "  ".repeat(depth);
-    let _ = writeln!(out, "{indent}message {} {{", name);
+    let _ = writeln!(out, "{indent}message {name} {{");
     write_reserved(out, message, depth + 1);
     for enumeration in &message.enum_type {
         write_enum(out, enumeration, depth + 1);
@@ -321,7 +323,9 @@ fn write_field(
     syntax: &str,
 ) {
     let indent = "  ".repeat(depth);
-    let label = if field.proto3_optional.unwrap_or(false) {
+    let label = if field.oneof_index.is_some() && !field.proto3_optional.unwrap_or(false) {
+        ""
+    } else if field.proto3_optional.unwrap_or(false) {
         "optional "
     } else if map_entry(parent, parent_name, field).is_some() {
         ""
@@ -353,6 +357,40 @@ fn write_field(
         field.name.as_deref().unwrap_or("unknown"),
         field.number.unwrap_or_default()
     );
+}
+
+fn message_index_in_proto(file: &FileDescriptorProto, target: &str) -> Option<Vec<i32>> {
+    message_index_in_proto_messages(
+        &file.message_type,
+        file.package.as_deref().unwrap_or(""),
+        target,
+    )
+}
+
+fn message_index_in_proto_messages(
+    messages: &[DescriptorProto],
+    parent: &str,
+    target: &str,
+) -> Option<Vec<i32>> {
+    for (index, message) in messages.iter().enumerate() {
+        let index = i32::try_from(index).ok()?;
+        let name = message.name.as_deref()?;
+        let full_name = if parent.is_empty() {
+            name.to_string()
+        } else {
+            format!("{parent}.{name}")
+        };
+        if target == full_name {
+            return Some(vec![index]);
+        }
+        if let Some(mut child) =
+            message_index_in_proto_messages(&message.nested_type, &full_name, target)
+        {
+            child.insert(0, index);
+            return Some(child);
+        }
+    }
+    None
 }
 
 fn map_entry<'a>(
@@ -443,7 +481,9 @@ mod tests {
         field_descriptor_proto::{Label, Type},
     };
 
-    use super::{ProtobufSerde, message_index, message_index_in, normalize};
+    use super::{
+        ProtobufSerde, message_index, message_index_in, message_index_in_proto, normalize,
+    };
     use crate::format::SchemaDeserializer;
 
     #[test]
@@ -553,6 +593,41 @@ mod tests {
         let inner = pool.get_message_by_name("demo.Outer.Inner").unwrap();
         check!(message_index(&inner).unwrap() == vec![0, 0]);
         check!(message_index_in(inner.parent_file().messages(), "demo.Missing").is_none());
+    }
+
+    #[test]
+    fn proto2_oneof_members_have_no_field_labels() {
+        let source = r#"
+            syntax = "proto2";
+            package demo;
+            message Choice {
+              oneof value { string text = 1; int64 number = 2; }
+            }
+        "#;
+        let file = protox_parse::parse("choice.proto", source).unwrap();
+        let rendered = normalize(&file);
+        check!(
+            protox_parse::parse("choice.proto", &rendered).is_ok(),
+            "{rendered}"
+        );
+        check!(!rendered.contains("optional string text"), "{rendered}");
+        check!(!rendered.contains("optional int64 number"), "{rendered}");
+    }
+
+    #[test]
+    fn normalized_message_index_accounts_for_synthetic_map_entries() {
+        let source = r#"
+            syntax = "proto3";
+            package demo;
+            message Outer {
+              message Inner { string value = 1; }
+              map<string, int32> counts = 1;
+            }
+        "#;
+        let original = protox_parse::parse("index.proto", source).unwrap();
+        let normalized = protox_parse::parse("index.proto", &normalize(&original)).unwrap();
+        check!(message_index_in_proto(&original, "demo.Outer.Inner") == Some(vec![0, 0]));
+        check!(message_index_in_proto(&normalized, "demo.Outer.Inner") == Some(vec![0, 1]));
     }
 
     #[test]
