@@ -19,8 +19,8 @@ pub enum SrError {
     Forbidden,
     #[error("{0}")]
     InvalidRequest(String),
-    #[error("Forwarding failed: {0}")]
-    ForwardFailed(String),
+    #[error("Error while forwarding register schema request to the leader")]
+    ForwardFailed,
     #[error("Unknown leader: {0}")]
     UnknownLeader(String),
     #[error("Subject '{0}' not found.")]
@@ -78,7 +78,7 @@ impl SrError {
             Self::MethodNotAllowed => 405,
             Self::Forbidden => 40301,
             Self::InvalidRequest(_) => 400,
-            Self::ForwardFailed(_) => 50003,
+            Self::ForwardFailed => 50003,
             Self::UnknownLeader(_) => 50004,
             Self::SubjectNotFound(_) => 40401,
             Self::VersionNotFound => 40402,
@@ -120,7 +120,7 @@ impl SrError {
             | Self::InvalidMode(_)
             | Self::ReferenceNotFound(_)
             | Self::ReferencedByOthers(_) => StatusCode::UNPROCESSABLE_ENTITY,
-            Self::Backend(_) | Self::ForwardFailed(_) | Self::UnknownLeader(_) => {
+            Self::Backend(_) | Self::ForwardFailed | Self::UnknownLeader(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
             Self::Incompatible(_) => StatusCode::CONFLICT,
@@ -177,7 +177,7 @@ mod tests {
             ),
             (
                 "forward_failed",
-                SrError::ForwardFailed("unreachable".into()),
+                SrError::ForwardFailed,
                 50003,
                 StatusCode::INTERNAL_SERVER_ERROR,
             ),

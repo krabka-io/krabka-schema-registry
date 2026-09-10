@@ -2,7 +2,7 @@
 //! the named version.
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, State},
     response::Response,
 };
 use serde::Deserialize;
@@ -12,7 +12,8 @@ use crate::{
     error::SrError,
     format::SchemaType,
     rest::{
-        AppState, deserialize_bool, parse_optional_version as parse_version, response::ok_json,
+        AppState, Query, deserialize_bool, parse_optional_version as parse_version,
+        response::ok_json,
     },
 };
 

@@ -1,7 +1,7 @@
 //! `/subjects/*` endpoints.
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, State},
     response::Response,
 };
 use serde::Deserialize;
@@ -12,7 +12,7 @@ use crate::{
     ids::{SchemaId, SchemaVersion},
     kafkastore::RegisterSchema,
     rest::{
-        AppState, DeletedQ, deserialize_bool, parse_optional_version,
+        AppState, DeletedQ, Query, deserialize_bool, parse_optional_version,
         response::{ok_json, ok_raw},
     },
 };

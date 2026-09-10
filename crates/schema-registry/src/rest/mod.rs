@@ -15,10 +15,12 @@ use std::sync::Arc;
 
 use axum::{
     Router,
-    extract::{Path, Query, State},
+    extract::{FromRequestParts, Path, State},
+    http::request::Parts,
     response::Response,
     routing::{get, post},
 };
+use serde::de::DeserializeOwned;
 
 use crate::{
     error::SrError,
@@ -29,6 +31,23 @@ use crate::{
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<KafkaStore>,
+}
+
+pub struct Query<T>(pub T);
+
+impl<S, T> FromRequestParts<S> for Query<T>
+where
+    S: Send + Sync,
+    T: DeserializeOwned,
+{
+    type Rejection = SrError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        axum::extract::Query::<T>::from_request_parts(parts, state)
+            .await
+            .map(|axum::extract::Query(value)| Self(value))
+            .map_err(|error| SrError::InvalidRequest(error.to_string()))
+    }
 }
 
 /// `?deleted=true` query toggle shared by the GET endpoints that can surface

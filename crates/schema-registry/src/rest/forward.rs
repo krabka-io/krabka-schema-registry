@@ -113,7 +113,10 @@ async fn proxy(fwd: &ForwardState, primary_url: &str, req: Request) -> Response 
             }
             out
         }
-        Err(e) => SrError::ForwardFailed(e.to_string()).into_response(),
+        Err(error) => {
+            tracing::warn!(%error, %url, "schema registry request forwarding failed");
+            SrError::ForwardFailed.into_response()
+        }
     }
 }
 

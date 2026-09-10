@@ -167,6 +167,19 @@ async fn protocol_errors_match_cp_and_boolean_queries_are_lenient() {
             .unwrap();
         assert2::assert!(response.status() == StatusCode::OK);
     }
+    let duplicate = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/subjects?deleted=true&deleted=false")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (status, body) = error_json(duplicate).await;
+    assert2::assert!(status == StatusCode::BAD_REQUEST);
+    assert2::assert!(body["error_code"] == 400);
 
     let denied = app.clone().layer(axum::middleware::from_fn_with_state(
         std::sync::Arc::new(SchemaRegistryAuthz::new(
@@ -284,6 +297,9 @@ async fn forwarding_errors_use_confluent_codes() {
         let (status, body) = error_json(response).await;
         assert2::assert!(u64::from(status.as_u16()) == fixture["status"].as_u64().unwrap());
         assert2::assert!(body["error_code"].as_i64() == Some(expected_code));
+        if name == "stopped-leader" {
+            assert2::assert!(body == fixture["body"]);
+        }
     }
 
     cancel.cancel();

@@ -1,14 +1,14 @@
 //! DELETE endpoints for versions and subjects, both soft and permanent.
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, State},
     response::Response,
 };
 use serde::Deserialize;
 
 use crate::{
     error::SrError,
-    rest::{AppState, deserialize_bool, parse_concrete_version, response::ok_json},
+    rest::{AppState, Query, deserialize_bool, parse_concrete_version, response::ok_json},
 };
 
 #[derive(Deserialize, Default)]
