@@ -494,6 +494,54 @@ async fn single_node_enforces_authn_and_authz() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plaintext_listener_enforces_host_scoped_deny() {
+    let dir = tempfile::tempdir().unwrap();
+    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+        .await
+        .unwrap();
+    let bootstrap = broker.listen_addr().to_string();
+    seed_acls(&bootstrap).await;
+
+    let mut node = start_secure_node(&bootstrap).await;
+    await_state(&mut node.primary, 25, |state| state.is_primary).await;
+    let http = reqwest::Client::new();
+    await_register_200(&http, node.port, "s", 15).await;
+
+    let mut admin = AdminClient::connect(std::slice::from_ref(&bootstrap))
+        .await
+        .unwrap();
+    let outcomes = admin
+        .create_acls(&[AclEntry {
+            resource_type: ResourceType::Topic,
+            resource_name: "s".into(),
+            pattern_type: PatternType::Literal,
+            principal: "User:alice".into(),
+            host: "127.0.0.1".into(),
+            operation: AclOperation::Write,
+            permission_type: PermissionType::Deny,
+        }])
+        .await
+        .unwrap();
+    assert2::assert!(outcomes.into_iter().all(|outcome| outcome.error.is_none()));
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let denied = register_as_alice(&http, node.port, "s").await;
+        if denied.status() == 403 {
+            assert2::assert!(
+                denied.json::<serde_json::Value>().await.unwrap()["error_code"] == 40301
+            );
+            break;
+        }
+        assert2::assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+
+    node.cancel.cancel();
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn https_round_trip_enforces_auth_over_tls() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 

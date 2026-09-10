@@ -10,7 +10,7 @@
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{net::SocketAddr, path::PathBuf, str::FromStr, sync::Arc};
 
 use clap::Parser;
 use krabka_client_admin::AdminClient;
@@ -64,8 +64,13 @@ struct Args {
         default_value = "0.0.0.0:8081"
     )]
     listen_addr: SocketAddr,
-    #[arg(long, env = "KRABKA_ADMIN_LISTEN_ADDR", default_value = "0.0.0.0:9404")]
-    admin_listen_addr: SocketAddr,
+    /// Admin listener address, or `off` to disable profiling endpoints.
+    #[arg(
+        long,
+        env = "KRABKA_ADMIN_LISTEN_ADDR",
+        default_value = "127.0.0.1:9404"
+    )]
+    admin_listen_addr: AdminListenAddr,
     #[arg(
         long,
         env = "SCHEMA_REGISTRY_SCHEMAS_TOPIC",
@@ -343,12 +348,14 @@ async fn main() -> anyhow::Result<()> {
         "krabka-schema-registry",
     )?;
 
-    krabka_telemetry::profiling::serve_admin_with_config(
-        args.admin_listen_addr,
-        axum::Router::new(),
-        args.profiling.clone(),
-    )
-    .await?;
+    if let Some(admin_listen_addr) = args.admin_listen_addr.0 {
+        krabka_telemetry::profiling::serve_admin_with_config(
+            admin_listen_addr,
+            axum::Router::new(),
+            args.profiling.clone(),
+        )
+        .await?;
+    }
 
     let krabka_schema_registry::cli::SecurityOutput {
         config: security,
@@ -472,6 +479,24 @@ async fn main() -> anyhow::Result<()> {
     }
     telemetry.shutdown();
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AdminListenAddr(Option<SocketAddr>);
+
+impl FromStr for AdminListenAddr {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.eq_ignore_ascii_case("off") {
+            Ok(Self(None))
+        } else {
+            value
+                .parse()
+                .map(|address| Self(Some(address)))
+                .map_err(|error: std::net::AddrParseError| error.to_string())
+        }
+    }
 }
 
 impl Args {
@@ -662,7 +687,7 @@ mod tests {
     use krabka_schema_registry::{cli::build_security, config::RegistryRuntimeConfig};
     use krabka_units::{bytes, prelude::*};
 
-    use super::Args;
+    use super::{AdminListenAddr, Args};
 
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -829,8 +854,8 @@ mod tests {
                 ])
                 .expect("valid CLI address overrides environment");
                 assert!(
-                    args.admin_listen_addr
-                        == "127.0.0.1:9600".parse().expect("parse expected address")
+                    args.admin_listen_addr.0
+                        == Some("127.0.0.1:9600".parse().expect("parse expected address"))
                 );
             });
         }
@@ -935,13 +960,13 @@ mod tests {
                     defaults.schemas_topic_rf.into_value(),
                     defaults.acl_refresh,
                     defaults.bearer_jwks_refresh,
-                    defaults.admin_listen_addr,
+                    defaults.admin_listen_addr.0,
                 ) == (
                     RegistryRuntimeConfig::default(),
                     3,
                     secs(30),
                     None,
-                    "0.0.0.0:9404".parse().expect("parse expected address"),
+                    Some("127.0.0.1:9404".parse().expect("parse expected address")),
                 )
             );
 
@@ -1080,5 +1105,16 @@ mod tests {
         ])
         .expect("parse defaults");
         assert!(defaults.runtime_config().is_ok());
+    }
+
+    #[test]
+    fn admin_listener_can_be_disabled() {
+        let args = Args::try_parse_from([
+            "krabka-schema-registry",
+            "--bootstrap-servers=localhost:9092",
+            "--admin-listen-addr=off",
+        ])
+        .expect("parse disabled admin listener");
+        assert!(args.admin_listen_addr == AdminListenAddr(None));
     }
 }

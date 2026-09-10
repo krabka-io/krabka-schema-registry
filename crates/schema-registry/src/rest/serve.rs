@@ -1,9 +1,8 @@
 //! Serve the registry router over plain HTTP, or over HTTPS with an optional
 //! mTLS client-cert → `Principal`. It models `grpc-gateway/src/serve.rs`.
 //!
-//! The plaintext path [`serve_http`] is byte-for-byte the pre-security
-//! `axum::serve` call, so existing tests and the no-security default are
-//! unaffected. The TLS path [`serve_https`] terminates rustls per connection in
+//! The plaintext path [`serve_http`] attaches each connection's peer address.
+//! The TLS path [`serve_https`] terminates rustls per connection in
 //! a manual accept loop. After the handshake it extracts the peer certificate's
 //! subject DN into a [`crate::auth::MtlsPrincipal`] and injects that into every
 //! request's extensions for that connection. The registry's `auth_layer`
@@ -12,7 +11,7 @@
 
 use std::sync::Arc;
 
-use axum::Router;
+use axum::{Router, extract::ConnectInfo};
 use hyper_util::rt::TokioIo;
 use krabka_security::{AuthMethod, Principal, TlsConfig};
 use tokio::net::{TcpListener, TcpStream};
@@ -22,7 +21,7 @@ use tower::ServiceExt;
 use crate::auth::MtlsPrincipal;
 
 /// Serve `app` on `listener` over plaintext HTTP. Returns when `shutdown` is
-/// cancelled. This is identical to the pre-security `axum::serve` call.
+/// cancelled.
 ///
 /// # Errors
 /// Propagates the `std::io` error from `axum::serve`.
@@ -31,9 +30,12 @@ pub async fn serve_http(
     app: Router,
     shutdown: CancellationToken,
 ) -> std::io::Result<()> {
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move { shutdown.cancelled().await })
-        .await
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move { shutdown.cancelled().await })
+    .await
 }
 
 /// Serve `app` on `listener` over HTTPS, terminating rustls per connection.
@@ -89,10 +91,9 @@ async fn serve_tls(
                     let app = app.clone();
                     let principal = principal.clone();
                     async move {
-                        // Inject the peer address so `authz_layer` can do
-                        // host-based ACL matching; it falls back to `0.0.0.0:0`
-                        // for plaintext connections that never reach this path.
-                        req.extensions_mut().insert(peer);
+                        // Match axum's plaintext `ConnectInfo` extension so
+                        // authorization has one peer-address contract.
+                        req.extensions_mut().insert(ConnectInfo(peer));
                         if let Some(p) = principal {
                             // `auth_layer` reads `MtlsPrincipal` as the
                             // highest-precedence credential.
