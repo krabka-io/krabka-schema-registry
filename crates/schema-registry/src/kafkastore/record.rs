@@ -125,6 +125,22 @@ pub struct DeleteSubjectValue {
     pub version: SchemaVersion,
 }
 
+/// Krabka's durable per-subject version marker. It uses Confluent's `NOOP`
+/// key type so other registries safely ignore it while log compaction retains
+/// one marker per subject.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VersionHighWaterKey {
+    pub keytype: String,
+    pub subject: String,
+    pub magic: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VersionHighWaterValue {
+    #[serde(rename = "nextVersion")]
+    pub next_version: SchemaVersion,
+}
+
 /// A decoded `_schemas` record.
 ///
 /// Unknown key-types and tombstones decode to a non-panicking variant. The
@@ -139,6 +155,7 @@ pub enum SchemaRecord {
     Mode(ModeKey, Option<ModeValue>),
     /// A soft subject-delete marker.
     DeleteSubject(DeleteSubjectKey, DeleteSubjectValue),
+    VersionHighWater(VersionHighWaterKey, VersionHighWaterValue),
     /// A `SCHEMA` key with a null value = permanent version delete.
     Tombstone(SchemaKey),
     Noop,
@@ -188,7 +205,14 @@ impl SchemaRecord {
                 // own SCHEMA tombstones, so this marker is a no-op on replay.
                 _ => Self::Noop,
             },
-            Some("NOOP" | "CLEAR_SUBJECTS" | "CLEAR_SUBJECT") => Self::Noop,
+            Some("NOOP") => match (
+                serde_json::from_slice::<VersionHighWaterKey>(key),
+                value.and_then(|v| serde_json::from_slice::<VersionHighWaterValue>(v).ok()),
+            ) {
+                (Ok(k), Some(v)) => Self::VersionHighWater(k, v),
+                _ => Self::Noop,
+            },
+            Some("CLEAR_SUBJECTS" | "CLEAR_SUBJECT") => Self::Noop,
             _ => Self::Unknown,
         }
     }
@@ -356,6 +380,22 @@ pub fn encode_tombstone(subject: &str, version: SchemaVersion) -> Vec<u8> {
     serde_json::to_vec(&SchemaKey::new(subject, version)).expect("schema key serialises")
 }
 
+#[must_use]
+/// # Panics
+/// Panics only if serialising these plain record structs fails.
+pub fn encode_version_high_water(subject: &str, next_version: SchemaVersion) -> (Vec<u8>, Vec<u8>) {
+    let key = VersionHighWaterKey {
+        keytype: "NOOP".to_string(),
+        subject: subject.to_string(),
+        magic: 0,
+    };
+    let value = VersionHighWaterValue { next_version };
+    (
+        serde_json::to_vec(&key).expect("version marker key serialises"),
+        serde_json::to_vec(&value).expect("version marker value serialises"),
+    )
+}
+
 /// Build a `MODE` record's (key, value). `subject = None` is the global mode.
 #[must_use]
 /// # Panics
@@ -459,6 +499,18 @@ mod tests {
         }
         let (gk, _gv) = encode_mode(None, "IMPORT");
         assert2::assert!(&gk == br#"{"keytype":"MODE","subject":null,"magic":0}"#);
+    }
+
+    #[test]
+    fn version_high_water_round_trips_as_noop_extension() {
+        let (key, value) = encode_version_high_water("s", sv(4));
+        match SchemaRecord::decode(&key, Some(&value)) {
+            SchemaRecord::VersionHighWater(key, value) => {
+                assert2::assert!(key.subject == "s");
+                assert2::assert!(value.next_version == sv(4));
+            }
+            _ => panic!("expected version high-water record"),
+        }
     }
 
     #[test]

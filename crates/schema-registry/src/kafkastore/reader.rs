@@ -91,6 +91,11 @@ pub fn apply_record(store: &RwLock<StoreState>, rec: SchemaRecord) {
         SchemaRecord::DeleteSubject(k, _v) => {
             store.write().soft_delete_subject(&k.subject);
         }
+        SchemaRecord::VersionHighWater(k, v) => {
+            store
+                .write()
+                .observe_next_version(&k.subject, v.next_version);
+        }
         SchemaRecord::Mode(k, Some(v)) => {
             let mut s = store.write();
             match k.subject {
@@ -249,6 +254,7 @@ mod tests {
     use super::*;
     use crate::{
         config::RegistryRuntimeConfig,
+        format::SchemaType,
         ids::{SchemaId, SchemaVersion},
         kafkastore::record::{SchemaKey, SchemaValue},
     };
@@ -334,7 +340,10 @@ mod tests {
 
     #[test]
     fn apply_record_handles_mode_delete_tombstone() {
-        use crate::kafkastore::record::{DeleteSubjectKey, DeleteSubjectValue, ModeKey, ModeValue};
+        use crate::kafkastore::record::{
+            DeleteSubjectKey, DeleteSubjectValue, ModeKey, ModeValue, VersionHighWaterKey,
+            VersionHighWaterValue,
+        };
         let store = RwLock::new(StoreState::default());
         let v = SchemaValue {
             subject: "s".into(),
@@ -425,5 +434,30 @@ mod tests {
             SchemaRecord::Tombstone(SchemaKey::new("s", SchemaVersion(1))),
         );
         assert2::assert!(store.read().versions("s", true).is_none());
+
+        apply_record(
+            &store,
+            SchemaRecord::VersionHighWater(
+                VersionHighWaterKey {
+                    keytype: "NOOP".into(),
+                    subject: "compacted".into(),
+                    magic: 0,
+                },
+                VersionHighWaterValue {
+                    next_version: SchemaVersion(4),
+                },
+            ),
+        );
+        let registered = store
+            .write()
+            .register(
+                "compacted",
+                SchemaType::Avro,
+                "{\"type\":\"int\"}",
+                &[],
+                None,
+            )
+            .unwrap();
+        assert2::assert!(registered.version == SchemaVersion(4));
     }
 }

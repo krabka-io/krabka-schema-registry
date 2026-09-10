@@ -220,6 +220,13 @@ impl KafkaStore {
                 ));
             };
             format::parse(ty, schema, &resolved)?; // 42201 if unparseable
+            if self
+                .store
+                .read()
+                .schema_id_conflicts(id, ty, schema, references, message_type)?
+            {
+                return Err(SrError::SchemaIdConflict(id));
+            }
             let (key, value) = record::encode_schema_with_message_type(
                 subject,
                 version,
@@ -437,10 +444,15 @@ impl KafkaStore {
         {
             return Err(SrError::ReferencedByOthers(format!("{subject}:{version}")));
         }
-        let key = record::encode_tombstone(subject, version);
+        let next_version = self.store.read().next_version(subject);
+        let (key, value) = record::encode_version_high_water(subject, next_version);
+        self.writer
+            .produce(key, value, primary.as_ref())
+            .await
+            .map_err(|e| SrError::Backend(e.to_string()))?;
         let offset = self
             .writer
-            .produce_tombstone(key, primary.as_ref())
+            .produce_tombstone(record::encode_tombstone(subject, version), primary.as_ref())
             .await
             .map_err(|e| SrError::Backend(e.to_string()))?;
         self.await_applied(offset).await?;
@@ -511,6 +523,7 @@ impl KafkaStore {
             }
             all
         };
+        let next_version = self.store.read().next_version(subject);
         // Reference-protection: any live referrer of any version blocks (42206).
         for v in &all_versions {
             if !self
@@ -522,9 +535,24 @@ impl KafkaStore {
                 return Err(SrError::ReferencedByOthers(format!("{subject}:{v}")));
             }
         }
-        let mut last_offset = -1;
+        let (key, value) = record::encode_version_high_water(subject, next_version);
+        let mut last_offset = self
+            .writer
+            .produce(key, value, primary.as_ref())
+            .await
+            .map_err(|e| SrError::Backend(e.to_string()))?;
         for v in &all_versions {
             let key = record::encode_tombstone(subject, *v);
+            last_offset = self
+                .writer
+                .produce_tombstone(key, primary.as_ref())
+                .await
+                .map_err(|e| SrError::Backend(e.to_string()))?;
+        }
+        for key in [
+            record::config_key(Some(subject)),
+            record::mode_key(Some(subject)),
+        ] {
             last_offset = self
                 .writer
                 .produce_tombstone(key, primary.as_ref())

@@ -213,9 +213,28 @@
     "status": 200
   },
   {
+    "body": {
+      "error_code": 42205,
+      "message": "Overwrite new schema with id 42 is not permitted."
+    },
+    "method": "POST",
+    "op": "register_import_conflicting_id",
+    "path": "/subjects/i/versions",
+    "status": 422
+  },
+  {
+    "body": {
+      "id": 43
+    },
+    "method": "POST",
+    "op": "register_import_conflicting_version",
+    "path": "/subjects/i/versions",
+    "status": 200
+  },
+  {
     "body": [
       {
-        "id": 42,
+        "id": 43,
         "schema": "{\"type\":\"record\",\"name\":\"C\",\"fields\":[]}",
         "subject": "i",
         "version": 5

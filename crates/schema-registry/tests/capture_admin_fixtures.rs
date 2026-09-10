@@ -394,6 +394,19 @@ async fn run_mode_lifecycle(http: &reqwest::Client, base: &str) -> Vec<serde_jso
         "/subjects/i/versions",
         serde_json::json!({ "schema": av("C"), "id": 42, "version": 5 })
     );
+    // Capture cp's exact errors for both IMPORT conflicts.
+    step!(
+        "register_import_conflicting_id",
+        "POST",
+        "/subjects/i/versions",
+        serde_json::json!({ "schema": av("D"), "id": 42, "version": 6 })
+    );
+    step!(
+        "register_import_conflicting_version",
+        "POST",
+        "/subjects/i/versions",
+        serde_json::json!({ "schema": av("C"), "id": 43, "version": 5 })
+    );
     // 24. List all schemas.
     step!("get_schemas", "GET", "/schemas");
     // 25. Reverse-lookup subjects/versions for id 1.
