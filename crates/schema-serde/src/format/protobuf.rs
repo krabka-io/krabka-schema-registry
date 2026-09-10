@@ -195,7 +195,7 @@ pub fn normalize(file: &FileDescriptorProto) -> String {
     }
     for message in &file.message_type {
         out.push('\n');
-        write_message(&mut out, message, 0, package, syntax);
+        write_message(&mut out, message, 0, package, package, syntax);
     }
     for service in &file.service {
         out.push('\n');
@@ -209,14 +209,17 @@ fn write_message(
     message: &DescriptorProto,
     depth: usize,
     package: &str,
+    parent_name: &str,
     syntax: &str,
 ) {
+    let name = message.name.as_deref().unwrap_or("Unknown");
+    let full_name = if parent_name.is_empty() {
+        name.to_string()
+    } else {
+        format!("{parent_name}.{name}")
+    };
     let indent = "  ".repeat(depth);
-    let _ = writeln!(
-        out,
-        "{indent}message {} {{",
-        message.name.as_deref().unwrap_or("Unknown")
-    );
+    let _ = writeln!(out, "{indent}message {} {{", name);
     write_reserved(out, message, depth + 1);
     for enumeration in &message.enum_type {
         write_enum(out, enumeration, depth + 1);
@@ -226,7 +229,7 @@ fn write_message(
         .iter()
         .filter(|field| field.oneof_index.is_none())
     {
-        write_field(out, field, message, depth + 1, package, syntax);
+        write_field(out, field, message, &full_name, depth + 1, package, syntax);
     }
     for (index, oneof) in message.oneof_decl.iter().enumerate() {
         let fields: Vec<_> = message
@@ -235,7 +238,15 @@ fn write_message(
             .filter(|field| field.oneof_index == i32::try_from(index).ok())
             .collect();
         if fields.len() == 1 && fields[0].proto3_optional.unwrap_or(false) {
-            write_field(out, fields[0], message, depth + 1, package, syntax);
+            write_field(
+                out,
+                fields[0],
+                message,
+                &full_name,
+                depth + 1,
+                package,
+                syntax,
+            );
             continue;
         }
         let child_indent = "  ".repeat(depth + 1);
@@ -245,7 +256,7 @@ fn write_message(
             oneof.name.as_deref().unwrap_or("unknown")
         );
         for field in fields {
-            write_field(out, field, message, depth + 2, package, syntax);
+            write_field(out, field, message, &full_name, depth + 2, package, syntax);
         }
         let _ = writeln!(out, "{child_indent}}}");
     }
@@ -255,7 +266,7 @@ fn write_message(
             .as_ref()
             .is_some_and(prost_reflect::prost_types::MessageOptions::map_entry)
     }) {
-        write_message(out, nested, depth + 1, package, syntax);
+        write_message(out, nested, depth + 1, package, &full_name, syntax);
     }
     let _ = writeln!(out, "{indent}}}");
 }
@@ -304,6 +315,7 @@ fn write_field(
     out: &mut String,
     field: &FieldDescriptorProto,
     parent: &DescriptorProto,
+    parent_name: &str,
     depth: usize,
     package: &str,
     syntax: &str,
@@ -311,7 +323,7 @@ fn write_field(
     let indent = "  ".repeat(depth);
     let label = if field.proto3_optional.unwrap_or(false) {
         "optional "
-    } else if map_entry(parent, field).is_some() {
+    } else if map_entry(parent, parent_name, field).is_some() {
         ""
     } else {
         match (syntax, field.label()) {
@@ -321,7 +333,7 @@ fn write_field(
             _ => "",
         }
     };
-    let ty = map_entry(parent, field).map_or_else(
+    let ty = map_entry(parent, parent_name, field).map_or_else(
         || proto_type_name(field, package),
         |entry| {
             let key = entry.field.first().map_or_else(
@@ -345,11 +357,15 @@ fn write_field(
 
 fn map_entry<'a>(
     parent: &'a DescriptorProto,
+    parent_name: &str,
     field: &FieldDescriptorProto,
 ) -> Option<&'a DescriptorProto> {
-    let name = field.type_name.as_deref()?.rsplit('.').next()?;
+    let field_type = field.type_name.as_deref()?.trim_start_matches('.');
     parent.nested_type.iter().find(|nested| {
-        nested.name.as_deref() == Some(name)
+        nested
+            .name
+            .as_deref()
+            .is_some_and(|name| field_type == name || field_type == format!("{parent_name}.{name}"))
             && nested
                 .options
                 .as_ref()
@@ -422,7 +438,10 @@ fn write_service(out: &mut String, service: &ServiceDescriptorProto, package: &s
 #[cfg(test)]
 mod tests {
     use assert2::check;
-    use prost_reflect::prost_types::{DescriptorProto, FieldDescriptorProto, FileDescriptorProto};
+    use prost_reflect::prost_types::{
+        DescriptorProto, FieldDescriptorProto, FileDescriptorProto, MessageOptions,
+        field_descriptor_proto::{Label, Type},
+    };
 
     use super::{ProtobufSerde, message_index, message_index_in, normalize};
     use crate::format::SchemaDeserializer;
@@ -454,6 +473,53 @@ mod tests {
     }
 
     #[test]
+    fn imported_simple_name_does_not_match_local_map_entry() {
+        let map_entry = DescriptorProto {
+            name: Some("ItemsEntry".into()),
+            field: vec![
+                FieldDescriptorProto {
+                    name: Some("key".into()),
+                    number: Some(1),
+                    r#type: Some(Type::String as i32),
+                    ..Default::default()
+                },
+                FieldDescriptorProto {
+                    name: Some("value".into()),
+                    number: Some(2),
+                    r#type: Some(Type::Int32 as i32),
+                    ..Default::default()
+                },
+            ],
+            options: Some(MessageOptions {
+                map_entry: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let file = FileDescriptorProto {
+            package: Some("local".into()),
+            message_type: vec![DescriptorProto {
+                name: Some("Container".into()),
+                field: vec![FieldDescriptorProto {
+                    name: Some("items".into()),
+                    number: Some(1),
+                    label: Some(Label::Repeated as i32),
+                    r#type: Some(Type::Message as i32),
+                    type_name: Some(".other.ItemsEntry".into()),
+                    ..Default::default()
+                }],
+                nested_type: vec![map_entry],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let text = normalize(&file);
+        check!(text.contains("repeated other.ItemsEntry items = 1;"));
+        check!(!text.contains("map<string, int32> items = 1;"));
+    }
+
+    #[test]
     fn complex_descriptor_round_trips_and_nested_index_is_exact() {
         let source = r#"
             syntax = "proto3";
@@ -475,7 +541,10 @@ mod tests {
         );
         check!(rendered.contains("repeated Inner items = 1;"));
         check!(rendered.contains("oneof choice"));
-        check!(rendered.contains("map<string, int32> counts = 5;"));
+        check!(
+            rendered.contains("map<string, int32> counts = 5;"),
+            "{rendered}"
+        );
 
         let pool = prost_reflect::DescriptorPool::from_file_descriptor_set(
             prost_reflect::prost_types::FileDescriptorSet { file: vec![file] },

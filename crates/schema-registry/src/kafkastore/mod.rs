@@ -5,7 +5,7 @@ pub mod record;
 pub mod topic;
 pub mod writer;
 
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
 
 use krabka_units::convert::TimeExt as _;
 use parking_lot::RwLock;
@@ -50,6 +50,11 @@ pub struct KafkaStore {
     election_group: String,
     primary: RwLock<Option<watch::Receiver<crate::election::PrimaryState>>>,
     store_timeout: std::time::Duration,
+}
+
+struct WriteGuard<'a> {
+    _guard: tokio::sync::MutexGuard<'a, ()>,
+    deadline: tokio::time::Instant,
 }
 
 struct BarrierGuard {
@@ -175,11 +180,12 @@ impl KafkaStore {
 
     async fn prepare_write(
         &self,
+        deadline: tokio::time::Instant,
     ) -> Result<Option<krabka_client_producer::ConsumerGroupMetadata>, SrError> {
         let primary = self.primary.read().clone();
         let Some(primary) = primary else {
-            let barrier = self.order_barrier().await?;
-            self.await_barrier(barrier).await?;
+            let barrier = self.order_barrier(deadline).await?;
+            self.await_barrier(barrier, deadline).await?;
             return Ok(None);
         };
         let before = primary.borrow().clone();
@@ -202,15 +208,16 @@ impl KafkaStore {
             member_id: member_id.clone(),
             group_instance_id: None,
         };
-        self.writer.fence(&group).await.map_err(backend_error)?;
+        self.writer_before(deadline, self.writer.fence(&group))
+            .await?;
 
         // Fencing precedes the barrier so an abandoned old-primary transaction
         // cannot delay the newly elected primary's synchronization record.
         // The barrier is ordered after every record committed by the previous
         // primary. Waiting for the local reader to apply it makes all following
         // id/version decisions use a caught-up StoreState.
-        let barrier = self.order_barrier().await?;
-        self.await_barrier(barrier).await?;
+        let barrier = self.order_barrier(deadline).await?;
+        self.await_barrier(barrier, deadline).await?;
 
         let after = primary.borrow().clone();
         if !after.is_primary
@@ -224,10 +231,26 @@ impl KafkaStore {
         Ok(Some(group))
     }
 
-    async fn write_guard(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, SrError> {
-        tokio::time::timeout(self.store_timeout, self.write_gate.lock())
+    async fn write_guard(&self) -> Result<WriteGuard<'_>, SrError> {
+        let deadline = tokio::time::Instant::now() + self.store_timeout;
+        let guard = tokio::time::timeout_at(deadline, self.write_gate.lock())
             .await
-            .map_err(|_| SrError::OperationTimedOut)
+            .map_err(|_| SrError::OperationTimedOut)?;
+        Ok(WriteGuard {
+            _guard: guard,
+            deadline,
+        })
+    }
+
+    async fn writer_before<T>(
+        &self,
+        deadline: tokio::time::Instant,
+        future: impl Future<Output = anyhow::Result<T>>,
+    ) -> Result<T, SrError> {
+        tokio::time::timeout_at(deadline, future)
+            .await
+            .map_err(|_| SrError::OperationTimedOut)?
+            .map_err(backend_error)
     }
 
     /// The effective mode for `subject` (subject override else global else
@@ -271,7 +294,7 @@ impl KafkaStore {
     /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub async fn register(&self, req: RegisterSchema<'_>) -> Result<Registered, SrError> {
         let _gate = self.write_guard().await?;
-        let primary = self.prepare_write().await?;
+        let primary = self.prepare_write(_gate.deadline).await?;
         let RegisterSchema {
             subject,
             ty,
@@ -317,11 +340,12 @@ impl KafkaStore {
                 message_type,
             );
             let offset = self
-                .writer
-                .produce(key, value, primary.as_ref())
-                .await
-                .map_err(backend_error)?;
-            self.await_applied(offset).await?;
+                .writer_before(
+                    _gate.deadline,
+                    self.writer.produce(key, value, primary.as_ref()),
+                )
+                .await?;
+            self.await_applied(offset, _gate.deadline).await?;
             let span = tracing::Span::current();
             span.record("id", id.0);
             span.record("version", version.0);
@@ -363,11 +387,12 @@ impl KafkaStore {
             message_type,
         );
         let offset = self
-            .writer
-            .produce(key, value, primary.as_ref())
-            .await
-            .map_err(backend_error)?;
-        self.await_applied(offset).await?;
+            .writer_before(
+                _gate.deadline,
+                self.writer.produce(key, value, primary.as_ref()),
+            )
+            .await?;
+        self.await_applied(offset, _gate.deadline).await?;
         let span = tracing::Span::current();
         span.record("id", reg.id.0);
         span.record("version", reg.version.0);
@@ -398,7 +423,7 @@ impl KafkaStore {
     /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub async fn delete_subject_compat(&self, subject: &str) -> Result<Option<String>, SrError> {
         let _gate = self.write_guard().await?;
-        let primary = self.prepare_write().await?;
+        let primary = self.prepare_write(_gate.deadline).await?;
         let current = self
             .store
             .read()
@@ -409,18 +434,19 @@ impl KafkaStore {
         };
         let key = record::config_key(Some(subject));
         let offset = self
-            .writer
-            .produce_tombstone(key, primary.as_ref())
-            .await
-            .map_err(backend_error)?;
-        self.await_applied(offset).await?;
+            .writer_before(
+                _gate.deadline,
+                self.writer.produce_tombstone(key, primary.as_ref()),
+            )
+            .await?;
+        self.await_applied(offset, _gate.deadline).await?;
         Ok(Some(level))
     }
 
     #[tracing::instrument(level = "info", name = "kafkastore.set_compat", skip_all, fields(subject = subject.unwrap_or("global"), level = %level, mode = tracing::field::Empty), err)]
     async fn set_compat(&self, subject: Option<&str>, level: String) -> Result<(), SrError> {
         let _gate = self.write_guard().await?;
-        let primary = self.prepare_write().await?;
+        let primary = self.prepare_write(_gate.deadline).await?;
         let mode = match subject {
             Some(s) => self.store.read().effective_mode(s).to_string(),
             None => self.store.read().global_mode().to_string(),
@@ -433,11 +459,12 @@ impl KafkaStore {
         }
         let (key, value) = record::encode_config(subject, &level);
         let offset = self
-            .writer
-            .produce(key, value, primary.as_ref())
-            .await
-            .map_err(backend_error)?;
-        self.await_applied(offset).await?;
+            .writer_before(
+                _gate.deadline,
+                self.writer.produce(key, value, primary.as_ref()),
+            )
+            .await?;
+        self.await_applied(offset, _gate.deadline).await?;
         Ok(())
     }
 
@@ -451,7 +478,7 @@ impl KafkaStore {
         version: SchemaVersion,
     ) -> Result<SchemaVersion, SrError> {
         let _gate = self.write_guard().await?;
-        let primary = self.prepare_write().await?;
+        let primary = self.prepare_write(_gate.deadline).await?;
         self.ensure_writable(subject)?;
         let found = {
             let s = self.store.read();
@@ -480,11 +507,12 @@ impl KafkaStore {
             found.message_type.as_deref(),
         );
         let offset = self
-            .writer
-            .produce(key, value, primary.as_ref())
-            .await
-            .map_err(backend_error)?;
-        self.await_applied(offset).await?;
+            .writer_before(
+                _gate.deadline,
+                self.writer.produce(key, value, primary.as_ref()),
+            )
+            .await?;
+        self.await_applied(offset, _gate.deadline).await?;
         Ok(found.version)
     }
 
@@ -498,7 +526,7 @@ impl KafkaStore {
         version: SchemaVersion,
     ) -> Result<SchemaVersion, SrError> {
         let _gate = self.write_guard().await?;
-        let primary = self.prepare_write().await?;
+        let primary = self.prepare_write(_gate.deadline).await?;
         self.ensure_writable(subject)?;
         {
             let s = self.store.read();
@@ -526,16 +554,21 @@ impl KafkaStore {
         }
         let next_version = self.store.read().next_version(subject);
         let (key, value) = record::encode_version_high_water(subject, next_version);
-        self.writer
-            .produce(key, value, primary.as_ref())
-            .await
-            .map_err(backend_error)?;
+        self.writer_before(
+            _gate.deadline,
+            self.writer.produce(key, value, primary.as_ref()),
+        )
+        .await?;
         let offset = self
-            .writer
-            .produce_tombstone(record::encode_tombstone(subject, version), primary.as_ref())
-            .await
-            .map_err(backend_error)?;
-        self.await_applied(offset).await?;
+            .writer_before(
+                _gate.deadline,
+                self.writer.produce_tombstone(
+                    record::encode_tombstone(subject, version),
+                    primary.as_ref(),
+                ),
+            )
+            .await?;
+        self.await_applied(offset, _gate.deadline).await?;
         Ok(version)
     }
 
@@ -545,7 +578,7 @@ impl KafkaStore {
     /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub async fn soft_delete_subject(&self, subject: &str) -> Result<Vec<SchemaVersion>, SrError> {
         let _gate = self.write_guard().await?;
-        let primary = self.prepare_write().await?;
+        let primary = self.prepare_write(_gate.deadline).await?;
         self.ensure_writable(subject)?;
         let versions = {
             let s = self.store.read();
@@ -573,11 +606,12 @@ impl KafkaStore {
         let max = versions.iter().copied().max().unwrap_or(SchemaVersion(0));
         let (key, value) = record::encode_delete_subject(subject, max);
         let offset = self
-            .writer
-            .produce(key, value, primary.as_ref())
-            .await
-            .map_err(backend_error)?;
-        self.await_applied(offset).await?;
+            .writer_before(
+                _gate.deadline,
+                self.writer.produce(key, value, primary.as_ref()),
+            )
+            .await?;
+        self.await_applied(offset, _gate.deadline).await?;
         Ok(versions)
     }
 
@@ -591,7 +625,7 @@ impl KafkaStore {
         subject: &str,
     ) -> Result<Vec<SchemaVersion>, SrError> {
         let _gate = self.write_guard().await?;
-        let primary = self.prepare_write().await?;
+        let primary = self.prepare_write(_gate.deadline).await?;
         self.ensure_writable(subject)?;
         let all_versions = {
             let s = self.store.read();
@@ -617,30 +651,33 @@ impl KafkaStore {
         }
         let (key, value) = record::encode_version_high_water(subject, next_version);
         let mut last_offset = self
-            .writer
-            .produce(key, value, primary.as_ref())
-            .await
-            .map_err(backend_error)?;
+            .writer_before(
+                _gate.deadline,
+                self.writer.produce(key, value, primary.as_ref()),
+            )
+            .await?;
         for v in &all_versions {
             let key = record::encode_tombstone(subject, *v);
             last_offset = self
-                .writer
-                .produce_tombstone(key, primary.as_ref())
-                .await
-                .map_err(backend_error)?;
+                .writer_before(
+                    _gate.deadline,
+                    self.writer.produce_tombstone(key, primary.as_ref()),
+                )
+                .await?;
         }
         for key in [
             record::config_key(Some(subject)),
             record::mode_key(Some(subject)),
         ] {
             last_offset = self
-                .writer
-                .produce_tombstone(key, primary.as_ref())
-                .await
-                .map_err(backend_error)?;
+                .writer_before(
+                    _gate.deadline,
+                    self.writer.produce_tombstone(key, primary.as_ref()),
+                )
+                .await?;
         }
         if last_offset >= 0 {
-            self.await_applied(last_offset).await?;
+            self.await_applied(last_offset, _gate.deadline).await?;
         }
         Ok(all_versions)
     }
@@ -654,17 +691,18 @@ impl KafkaStore {
             return Err(SrError::InvalidMode(mode));
         }
         let _gate = self.write_guard().await?;
-        let primary = self.prepare_write().await?;
+        let primary = self.prepare_write(_gate.deadline).await?;
         if mode == "IMPORT" && !self.store.read().subjects(true).is_empty() {
             return Err(SrError::OperationNotPermitted("registry not empty".into()));
         }
         let (key, value) = record::encode_mode(None, &mode);
         let offset = self
-            .writer
-            .produce(key, value, primary.as_ref())
-            .await
-            .map_err(backend_error)?;
-        self.await_applied(offset).await?;
+            .writer_before(
+                _gate.deadline,
+                self.writer.produce(key, value, primary.as_ref()),
+            )
+            .await?;
+        self.await_applied(offset, _gate.deadline).await?;
         Ok(())
     }
 
@@ -677,17 +715,18 @@ impl KafkaStore {
             return Err(SrError::InvalidMode(mode));
         }
         let _gate = self.write_guard().await?;
-        let primary = self.prepare_write().await?;
+        let primary = self.prepare_write(_gate.deadline).await?;
         if mode == "IMPORT" && self.store.read().versions(subject, true).is_some() {
             return Err(SrError::OperationNotPermitted(subject.to_string()));
         }
         let (key, value) = record::encode_mode(Some(subject), &mode);
         let offset = self
-            .writer
-            .produce(key, value, primary.as_ref())
-            .await
-            .map_err(backend_error)?;
-        self.await_applied(offset).await?;
+            .writer_before(
+                _gate.deadline,
+                self.writer.produce(key, value, primary.as_ref()),
+            )
+            .await?;
+        self.await_applied(offset, _gate.deadline).await?;
         Ok(())
     }
 
@@ -697,26 +736,31 @@ impl KafkaStore {
     /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub async fn clear_subject_mode(&self, subject: &str) -> Result<(), SrError> {
         let _gate = self.write_guard().await?;
-        let primary = self.prepare_write().await?;
+        let primary = self.prepare_write(_gate.deadline).await?;
         let key = record::mode_key(Some(subject));
         let offset = self
-            .writer
-            .produce_tombstone(key, primary.as_ref())
-            .await
-            .map_err(backend_error)?;
-        self.await_applied(offset).await?;
+            .writer_before(
+                _gate.deadline,
+                self.writer.produce_tombstone(key, primary.as_ref()),
+            )
+            .await?;
+        self.await_applied(offset, _gate.deadline).await?;
         Ok(())
     }
 
     /// Order a unique marker after the write and wait until the reader sees it.
-    async fn await_applied(&self, _offset: i64) -> Result<(), SrError> {
-        let barrier = self.order_barrier().await?;
-        self.await_barrier(barrier).await
+    async fn await_applied(
+        &self,
+        _offset: i64,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), SrError> {
+        let barrier = self.order_barrier(deadline).await?;
+        self.await_barrier(barrier, deadline).await
     }
 
-    async fn order_barrier(&self) -> Result<BarrierGuard, SrError> {
-        tokio::time::timeout(
-            self.store_timeout,
+    async fn order_barrier(&self, deadline: tokio::time::Instant) -> Result<BarrierGuard, SrError> {
+        tokio::time::timeout_at(
+            deadline,
             BarrierGuard::order(self.barriers.clone(), self.writer.clone()),
         )
         .await
@@ -724,7 +768,11 @@ impl KafkaStore {
         .map_err(backend_error)
     }
 
-    async fn await_barrier(&self, barrier: BarrierGuard) -> Result<(), SrError> {
+    async fn await_barrier(
+        &self,
+        barrier: BarrierGuard,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), SrError> {
         let mut rx = self.barrier_rx.clone();
         let wait = async {
             loop {
@@ -744,10 +792,15 @@ impl KafkaStore {
             }
             Ok::<(), SrError>(())
         };
-        tokio::time::timeout(self.store_timeout, wait)
+        tokio::time::timeout_at(deadline, wait)
             .await
             .map_err(|_| SrError::OperationTimedOut)??;
-        barrier.finish("schema-store barrier cleanup failed").await;
+        tokio::time::timeout_at(
+            deadline,
+            barrier.finish("schema-store barrier cleanup failed"),
+        )
+        .await
+        .map_err(|_| SrError::OperationTimedOut)?;
         Ok(())
     }
 

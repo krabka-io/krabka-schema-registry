@@ -26,6 +26,8 @@ use crate::{
 pub struct WriterSchema {
     pub schema: String,
     pub references: HashMap<String, String>,
+    /// Reference names in dependency-first order for parsers such as Avro.
+    pub reference_order: Vec<String>,
 }
 
 /// How the cache resolves serialize-side ids.
@@ -304,12 +306,14 @@ impl SchemaCache {
                             i.message_type.as_deref(),
                         )
                         .await?;
-                    let references = self.client.reference_sources(&i.references).await?;
+                    let (references, reference_order) =
+                        self.client.reference_sources_ordered(&i.references).await?;
                     (
                         id,
                         WriterSchema {
                             schema: i.schema.clone(),
                             references,
+                            reference_order,
                         },
                         i.message_type.clone(),
                     )
@@ -325,12 +329,14 @@ impl SchemaCache {
                             i.message_type.as_deref(),
                         )
                         .await?;
-                    let references = self.client.reference_sources(&i.references).await?;
+                    let (references, reference_order) =
+                        self.client.reference_sources_ordered(&i.references).await?;
                     (
                         id,
                         WriterSchema {
                             schema: i.schema.clone(),
                             references,
+                            reference_order,
                         },
                         i.message_type.clone(),
                     )
@@ -340,19 +346,25 @@ impl SchemaCache {
                     if latest.schema != i.schema
                         || SchemaKind::from_wire_name(latest.schema_type.as_deref()) != i.kind
                         || latest.references != i.references
-                        || latest.message_type != i.message_type
+                        || latest.message_type.as_ref().is_some_and(|message_type| {
+                            i.message_type.as_ref() != Some(message_type)
+                        })
                     {
                         return Err(SchemaSerdeError::Schema(format!(
                             "latest schema for {} differs from the local {:?} schema",
                             i.subject, i.kind
                         )));
                     }
-                    let references = self.client.reference_sources(&latest.references).await?;
+                    let (references, reference_order) = self
+                        .client
+                        .reference_sources_ordered(&latest.references)
+                        .await?;
                     (
                         latest.id,
                         WriterSchema {
                             schema: latest.schema,
                             references,
+                            reference_order,
                         },
                         latest.message_type,
                     )
@@ -487,10 +499,37 @@ impl SchemaCache {
         schema: impl Into<String>,
         references: HashMap<String, String>,
     ) {
+        let mut reference_order: Vec<_> = references.keys().cloned().collect();
+        reference_order.sort();
+        self.seed_writer_schema_with_ordered_references(
+            id,
+            schema,
+            reference_order
+                .into_iter()
+                .map(|name| (name.clone(), references[&name].clone())),
+        );
+    }
+
+    /// Test/seed hook: install dependency-first named reference sources.
+    pub fn seed_writer_schema_with_ordered_references(
+        &self,
+        id: u32,
+        schema: impl Into<String>,
+        references: impl IntoIterator<Item = (String, String)>,
+    ) {
         let schema = schema.into();
+        let references: Vec<_> = references.into_iter().collect();
+        let reference_order = references.iter().map(|(name, _)| name.clone()).collect();
+        let references = references.into_iter().collect();
         let mut g = self.inner.lock().unwrap();
-        g.id_writer_schema
-            .insert(id, WriterSchema { schema, references });
+        g.id_writer_schema.insert(
+            id,
+            WriterSchema {
+                schema,
+                reference_order,
+                references,
+            },
+        );
         g.unavailable_schemas.remove(&id);
         g.retry_after.remove(&id);
         g.retry_attempts.remove(&id);
@@ -531,11 +570,15 @@ impl SchemaCache {
         id: u32,
     ) -> Result<(WriterSchema, Option<String>), SchemaSerdeError> {
         let root = self.client.schema_by_id(id).await?;
-        let sources = self.client.reference_sources(&root.references).await?;
+        let (sources, reference_order) = self
+            .client
+            .reference_sources_ordered(&root.references)
+            .await?;
         Ok((
             WriterSchema {
                 schema: root.schema,
                 references: sources,
+                reference_order,
             },
             root.message_type,
         ))
@@ -786,6 +829,41 @@ mod tests {
         check!(writer_schema.schema == "syntax = \"proto3\";");
         check!(writer_schema.references.is_empty());
         check!(c.writer_message_type(52).as_deref() == Some("demo.Local"));
+    }
+
+    #[tokio::test]
+    async fn prewarm_use_latest_accepts_absent_confluent_message_type() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/subjects/orders-value/versions/latest"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 53,
+                "version": 1,
+                "schema": "syntax = \"proto3\";",
+                "schemaType": "PROTOBUF"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let c = SchemaCache::new(
+            RegistryClient::new(server.uri()),
+            CacheConfig {
+                mode: RegisterMode::UseLatest,
+                ..CacheConfig::default()
+            },
+        );
+        c.intern(
+            "orders-value",
+            SchemaKind::Protobuf,
+            "syntax = \"proto3\";",
+            &[],
+            Some("demo.Local"),
+        );
+
+        c.prewarm().await.unwrap();
+
+        check!(c.id_for_subject("orders-value") == Some(53));
+        check!(c.writer_message_type(53).is_none());
     }
 
     #[tokio::test]

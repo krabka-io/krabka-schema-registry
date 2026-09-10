@@ -180,7 +180,10 @@ impl RegistryClient {
         subject: &str,
         version: i32,
     ) -> Result<FetchedSchema, SchemaSerdeError> {
-        let url = format!("{}/subjects/{subject}/versions/{version}", self.base_url);
+        let url = format!(
+            "{}/subjects/{subject}/versions/{version}?deleted=true",
+            self.base_url
+        );
         let resp: SubjectVersionResponse = self.get_json(&url).await?;
         Ok(FetchedSchema {
             schema: resp.schema,
@@ -205,17 +208,28 @@ impl RegistryClient {
         &self,
         references: &[SchemaReference],
     ) -> Result<HashMap<String, String>, SchemaSerdeError> {
+        self.reference_sources_ordered(references)
+            .await
+            .map(|(sources, _)| sources)
+    }
+
+    pub(crate) async fn reference_sources_ordered(
+        &self,
+        references: &[SchemaReference],
+    ) -> Result<(HashMap<String, String>, Vec<String>), SchemaSerdeError> {
         let mut sources = HashMap::new();
+        let mut order = Vec::new();
         let mut resolving = HashSet::new();
-        self.resolve_reference_sources(references, &mut sources, &mut resolving, 0)
+        self.resolve_reference_sources(references, &mut sources, &mut order, &mut resolving, 0)
             .await?;
-        Ok(sources)
+        Ok((sources, order))
     }
 
     async fn resolve_reference_sources(
         &self,
         references: &[SchemaReference],
         sources: &mut HashMap<String, String>,
+        order: &mut Vec<String>,
         resolving: &mut HashSet<(String, i32)>,
         depth: usize,
     ) -> Result<(), SchemaSerdeError> {
@@ -242,12 +256,14 @@ impl RegistryClient {
             Box::pin(self.resolve_reference_sources(
                 &referenced_schema.references,
                 sources,
+                order,
                 resolving,
                 depth + 1,
             ))
             .await?;
             resolving.remove(&reference_key);
             sources.insert(reference.name.clone(), referenced_schema.schema);
+            order.push(reference.name.clone());
         }
         Ok(())
     }
@@ -315,7 +331,7 @@ mod tests {
     use assert2::check;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
-        matchers::{body_json, method, path},
+        matchers::{body_json, method, path, query_param},
     };
 
     use super::{model::SchemaPayload, *};
@@ -569,6 +585,48 @@ mod tests {
             check!(error.is_subject_not_found() == subject_not_found);
             check!(error.is_transient_registry_failure() == transient);
         }
+    }
+
+    #[tokio::test]
+    async fn references_are_fetched_deleted_and_returned_dependency_first() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/subjects/b-value/versions/2"))
+            .and(query_param("deleted", "true"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 2,
+                "version": 2,
+                "schema": "B",
+                "references": [{"name": "a.avsc", "subject": "a-value", "version": 1}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/subjects/a-value/versions/1"))
+            .and(query_param("deleted", "true"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 1,
+                "version": 1,
+                "schema": "A"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let references = [SchemaReference {
+            name: "b.avsc".into(),
+            subject: "b-value".into(),
+            version: 2,
+        }];
+
+        let (sources, order) = RegistryClient::new(server.uri())
+            .reference_sources_ordered(&references)
+            .await
+            .unwrap();
+
+        check!(order == vec!["a.avsc", "b.avsc"]);
+        check!(sources["a.avsc"] == "A");
+        check!(sources["b.avsc"] == "B");
     }
 
     #[test]

@@ -115,7 +115,11 @@ where
     fn deserialize(&self, _topic: &str, bytes: &[u8]) -> Result<T, SchemaSerdeError> {
         let (id, body) = wire::decode(bytes)?;
         let writer = self.binding.cache.writer_schema_with_references(id)?;
-        let mut sources: Vec<&str> = writer.references.values().map(String::as_str).collect();
+        let mut sources: Vec<&str> = writer
+            .reference_order
+            .iter()
+            .filter_map(|name| writer.references.get(name).map(String::as_str))
+            .collect();
         sources.push(&writer.schema);
         let schemas =
             Schema::parse_list(&sources).map_err(|e| SchemaSerdeError::Schema(e.to_string()))?;
@@ -165,6 +169,21 @@ mod tests {
         total: Money,
     }
 
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, AvroSchema)]
+    struct A {
+        x: String,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, AvroSchema)]
+    struct B {
+        a: A,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, AvroSchema)]
+    struct C {
+        b: B,
+    }
+
     #[test]
     fn round_trips_with_seeded_id() {
         let cache = SchemaCache::new(RegistryClient::new("http://unused"), CacheConfig::default());
@@ -205,6 +224,32 @@ mod tests {
             decoded
                 == Invoice {
                     total: Money { cents: 19 }
+                }
+        );
+    }
+
+    #[test]
+    fn decodes_transitive_references_in_dependency_order() {
+        let cache = SchemaCache::new(RegistryClient::new("http://unused"), CacheConfig::default());
+        let serde = AvroSerde::<C>::value(&cache);
+        let a = r#"{"type":"record","name":"A","fields":[{"name":"x","type":"string"}]}"#;
+        let b = r#"{"type":"record","name":"B","fields":[{"name":"a","type":"A"}]}"#;
+        let c = r#"{"type":"record","name":"C","fields":[{"name":"b","type":"B"}]}"#;
+        cache.seed_writer_schema_with_ordered_references(
+            13,
+            c,
+            [("a.avsc".into(), a.into()), ("b.avsc".into(), b.into())],
+        );
+
+        let decoded = serde
+            .deserialize("orders", &wire::encode(13, &[4, b'o', b'k']))
+            .unwrap();
+        check!(
+            decoded
+                == C {
+                    b: B {
+                        a: A { x: "ok".into() }
+                    }
                 }
         );
     }
