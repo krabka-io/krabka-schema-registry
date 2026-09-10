@@ -171,10 +171,16 @@ pub struct SecurityConfig {
 /// Inline `user -> credential`. The credential is plaintext, as cp's
 /// `PropertyFileLoginModule` expects, or a `$2...` bcrypt hash. `file` is an
 /// htpasswd-style `user:cred` path.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct BasicAuthConfig {
     pub users: HashMap<String, String>,
     pub file: Option<PathBuf>,
+    pub required_roles: HashSet<String>,
+}
+impl std::fmt::Debug for BasicAuthConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BasicAuthConfig")
+    }
 }
 
 /// Reuse the broker OAuth validator; stored already-built.
@@ -295,5 +301,16 @@ mod tests {
         ));
         let cfg = super::BearerAuthConfig { validator };
         check!(format!("{cfg:?}") == "BearerAuthConfig");
+    }
+
+    #[test]
+    fn basic_auth_config_debug_does_not_leak_credentials() {
+        let cfg = super::BasicAuthConfig {
+            users: [("alice".to_owned(), "secret".to_owned())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        check!(format!("{cfg:?}") == "BasicAuthConfig");
     }
 }

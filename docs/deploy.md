@@ -87,6 +87,14 @@ forward hop; clients cannot bypass authentication by forging the forwarding
 header. Mount the value from a Secret and restrict registry-to-registry traffic
 with network policy or mTLS.
 
+Basic authentication accepts Confluent password-property entries such as
+`alice: pw,admin`. Set permitted roles with `SCHEMA_REGISTRY_AUTH_ROLES`, and
+provide inline users and authorization super-users with
+`SCHEMA_REGISTRY_BASIC_USERS` and `SCHEMA_REGISTRY_SUPER_USERS`; separate
+multiple entries with newlines so commas remain valid in roles and certificate
+subjects. `SCHEMA_REGISTRY_AUTH_ROLES=*` accepts any declared role. For broker
+SASL, mount the password and set `SCHEMA_REGISTRY_KAFKA_SASL_PASSWORD_FILE`.
+
 The profiling admin listener binds to `127.0.0.1:9404` by default. Set
 `--admin-listen-addr=off` (or `KRABKA_ADMIN_LISTEN_ADDR=off`) to disable it. Bind
 it to a non-loopback address only behind an authenticated administrative proxy.

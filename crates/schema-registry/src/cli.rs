@@ -36,7 +36,7 @@ pub const DEFAULT_JWKS_REFRESH: Time = minutes(1);
 /// validation and assembly, so it is unit-testable. The all-[`Default`] value
 /// has no TLS, no auth, no authz, and a plaintext broker client, and it yields
 /// the fully-open [`SecurityConfig::default`] behaviour.
-#[derive(Debug, Default, Clone)]
+#[derive(Default, Clone)]
 pub struct SecurityCliInput {
     /// Reject unauthenticated (anonymous) requests with `401`.
     pub require_auth: bool,
@@ -46,6 +46,8 @@ pub struct SecurityCliInput {
     pub basic_auth_file: Option<PathBuf>,
     /// Inline Basic credentials as `user:cred` (repeatable).
     pub basic_users: Vec<String>,
+    /// Basic roles permitted to authenticate. Empty accepts every role.
+    pub auth_roles: Vec<String>,
     /// Bearer-token mode: `off` | `unsecured` | `jwks`.
     pub bearer: String,
     /// JWT claim whose value becomes the principal name (Bearer mode).
@@ -83,6 +85,8 @@ pub struct SecurityCliInput {
     pub kafka_sasl_username: Option<String>,
     /// SASL password (PLAIN / SCRAM).
     pub kafka_sasl_password: Option<String>,
+    /// File containing the SASL password (PLAIN / SCRAM).
+    pub kafka_sasl_password_file: Option<PathBuf>,
     /// GSSAPI keytab containing the client principal's long-term key.
     pub kafka_sasl_keytab_path: Option<PathBuf>,
     /// GSSAPI Kerberos client principal.
@@ -99,6 +103,12 @@ pub struct SecurityCliInput {
     pub kafka_tls_ca: Option<PathBuf>,
     /// TLS SNI / server name for the broker connection (SSL / `SASL_SSL`).
     pub kafka_tls_server_name: Option<String>,
+}
+
+impl std::fmt::Debug for SecurityCliInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SecurityCliInput")
+    }
 }
 
 /// JWKS key-set handle plus the metadata the binary needs to drive the
@@ -192,6 +202,7 @@ fn build_basic(input: &SecurityCliInput) -> Option<BasicAuthConfig> {
     Some(BasicAuthConfig {
         users,
         file: input.basic_auth_file.clone(),
+        required_roles: input.auth_roles.iter().cloned().collect(),
     })
 }
 
@@ -362,9 +373,21 @@ fn build_sasl(input: &SecurityCliInput) -> anyhow::Result<SaslCredentials> {
             let username = input.kafka_sasl_username.clone().ok_or_else(|| {
                 anyhow::anyhow!("--kafka-sasl-username required for SASL_* protocols")
             })?;
-            let password = input.kafka_sasl_password.clone().ok_or_else(|| {
-                anyhow::anyhow!("--kafka-sasl-password required for SASL_* protocols")
-            })?;
+            let password = match (&input.kafka_sasl_password, &input.kafka_sasl_password_file) {
+                (Some(_), Some(_)) => anyhow::bail!(
+                    "--kafka-sasl-password and --kafka-sasl-password-file are mutually exclusive"
+                ),
+                (Some(password), None) => password.clone(),
+                (None, Some(path)) => std::fs::read_to_string(path)
+                    .map_err(|error| {
+                        anyhow::anyhow!("read Kafka SASL password {}: {error}", path.display())
+                    })?
+                    .trim_end_matches(['\r', '\n'])
+                    .to_owned(),
+                (None, None) => anyhow::bail!(
+                    "--kafka-sasl-password or --kafka-sasl-password-file required for SASL_* protocols"
+                ),
+            };
             match mechanism {
                 "PLAIN" => Ok(SaslCredentials::Plain { username, password }),
                 "SCRAM-SHA-256" => Ok(SaslCredentials::Scram {
@@ -542,6 +565,16 @@ mod tests {
                     .collect()
         );
         assert2::assert!(b.file == Some(path));
+    }
+
+    #[test]
+    fn security_input_debug_redacts_credentials() {
+        let value = SecurityCliInput {
+            basic_users: vec!["alice:basic-secret".into()],
+            kafka_sasl_password: Some("sasl-secret".into()),
+            ..input()
+        };
+        assert2::assert!(format!("{value:?}") == "SecurityCliInput");
     }
 
     // ---- bearer ----------------------------------------------------------
@@ -742,6 +775,29 @@ mod tests {
         assert2::assert!(c.tls.is_none());
         assert2::assert!(credentials.0.as_str() == "u");
         assert2::assert!(credentials.1.as_str() == "p");
+    }
+
+    #[test]
+    fn client_sasl_password_file_is_read_and_conflicts_with_inline_password() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "from-file\r\n").unwrap();
+        let from_file = SecurityCliInput {
+            kafka_security_protocol: "SASL_PLAINTEXT".into(),
+            kafka_sasl_username: Some("u".into()),
+            kafka_sasl_password_file: Some(file.path().to_owned()),
+            ..input()
+        };
+        let client = sec(&from_file).client.unwrap();
+        assert2::assert!(matches!(
+            client.sasl,
+            Some(SaslCredentials::Plain { password, .. }) if password == "from-file"
+        ));
+
+        let conflict = SecurityCliInput {
+            kafka_sasl_password: Some("inline".into()),
+            ..from_file
+        };
+        assert2::assert!(build_security(&conflict).is_err());
     }
 
     #[test]

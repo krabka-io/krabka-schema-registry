@@ -80,6 +80,7 @@ fn secure_cfg_with_scheme(
             basic: Some(BasicAuthConfig {
                 users: alice_users(),
                 file: None,
+                required_roles: HashSet::new(),
             }),
             bearer: None,
             tls,
