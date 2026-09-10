@@ -86,36 +86,28 @@ fn fetch_error_action(e: &ClientError) -> FetchErrorAction {
     }
 }
 
-fn resolve_bootstrap_addrs(bootstrap: &str) -> Vec<SocketAddr> {
-    bootstrap
-        .split(',')
-        .filter_map(|b| b.trim().to_socket_addrs().ok())
-        .flatten()
-        .collect()
-}
-
 fn should_log_failure(consecutive: u64) -> bool {
     consecutive == 1 || consecutive.is_power_of_two()
 }
 
-async fn connect_topic_leader(
-    bootstrap: &str,
-    opts: &ConnectionOptions,
+fn resolve_leader_addr(host: &str, port: i32, topic: &str) -> Result<SocketAddr, ClientError> {
+    let port = u16::try_from(port).map_err(|_| {
+        ClientError::InvalidConfig(format!("invalid leader port {port} for {topic}-0"))
+    })?;
+    (host, port)
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut addrs| addrs.next())
+        .ok_or_else(|| {
+            ClientError::InvalidConfig(format!("cannot resolve leader {host}:{port} for {topic}-0"))
+        })
+}
+
+async fn topic_route(
+    conn: &Connection,
     topic: &str,
     current_topic_id: WireUuid,
-) -> Result<(Connection, WireUuid), ClientError> {
-    let mut last_error = ClientError::Disconnected;
-    let mut bootstrap_conn = None;
-    for addr in resolve_bootstrap_addrs(bootstrap) {
-        match Connection::connect_with_options(addr, opts.clone()).await {
-            Ok(conn) => {
-                bootstrap_conn = Some(conn);
-                break;
-            }
-            Err(error) => last_error = error,
-        }
-    }
-    let conn = bootstrap_conn.ok_or(last_error)?;
+) -> Result<(WireUuid, Option<SocketAddr>), ClientError> {
     let metadata = conn
         .send(MetadataRequest {
             topics: Some(vec![MetadataRequestTopic {
@@ -157,23 +149,50 @@ async fn connect_topic_leader(
         .iter()
         .find(|broker| broker.node_id == partition.leader_id && broker.port > 0)
     else {
-        return Ok((conn, topic_id));
+        return Ok((topic_id, None));
     };
-    let Some(addr) = format!("{}:{}", leader.host, leader.port)
-        .to_socket_addrs()
-        .ok()
-        .and_then(|mut addrs| addrs.next())
-    else {
-        return Err(ClientError::InvalidConfig(format!(
-            "cannot resolve leader {}:{} for {topic}-0",
-            leader.host, leader.port
-        )));
-    };
-    conn.close();
     Ok((
-        Connection::connect_with_options(addr, opts.clone()).await?,
         topic_id,
+        Some(resolve_leader_addr(&leader.host, leader.port, topic)?),
     ))
+}
+
+async fn connect_topic_leader(
+    bootstrap: &str,
+    opts: &ConnectionOptions,
+    topic: &str,
+    current_topic_id: WireUuid,
+) -> Result<(Connection, WireUuid), ClientError> {
+    let mut last_error = ClientError::Disconnected;
+    for bootstrap_host in bootstrap.split(',').map(str::trim) {
+        let Ok(addrs) = bootstrap_host.to_socket_addrs() else {
+            continue;
+        };
+        for addr in addrs {
+            let conn = match Connection::connect_with_options(addr, opts.clone()).await {
+                Ok(conn) => conn,
+                Err(error) => {
+                    last_error = error;
+                    continue;
+                }
+            };
+            match topic_route(&conn, topic, current_topic_id).await {
+                Ok((topic_id, None)) => return Ok((conn, topic_id)),
+                Ok((topic_id, Some(leader_addr))) => {
+                    conn.close();
+                    match Connection::connect_with_options(leader_addr, opts.clone()).await {
+                        Ok(leader) => return Ok((leader, topic_id)),
+                        Err(error) => last_error = error,
+                    }
+                }
+                Err(error) => {
+                    conn.close();
+                    last_error = error;
+                }
+            }
+        }
+    }
+    Err(last_error)
 }
 
 async fn log_start_offset(conn: &Connection, topic: &str) -> Result<i64, ClientError> {
@@ -218,6 +237,18 @@ async fn sleep_or_cancel(cancel: &CancellationToken, duration: Time) -> bool {
         () = cancel.cancelled() => true,
         () = tokio::time::sleep(duration.to_std()) => false,
     }
+}
+
+fn reset_reader_state(
+    store: &RwLock<StoreState>,
+    defaults: &StoreState,
+    applied_tx: &watch::Sender<i64>,
+    next: &mut i64,
+    offset: i64,
+) {
+    *store.write() = defaults.clone();
+    *next = offset;
+    let _ = applied_tx.send(offset - 1);
 }
 
 /// Apply one decoded record to the store. It returns nothing and is idempotent
@@ -284,6 +315,7 @@ pub fn spawn(
     security: Option<ClientSecurity>,
     cancel: CancellationToken,
 ) -> StoreReader {
+    let defaults = initial_state.clone();
     let store = Arc::new(RwLock::new(initial_state));
     let (applied_tx, applied_rx) = watch::channel(-1_i64);
     let topic = cfg.schemas_topic.clone();
@@ -310,6 +342,14 @@ pub fn spawn(
         loop {
             let conn = match connect_topic_leader(&bootstrap, &opts, &topic, topic_id).await {
                 Ok((conn, resolved_topic_id)) => {
+                    if topic_id != WireUuid::ZERO && resolved_topic_id != topic_id {
+                        tracing::warn!(
+                            old_topic_id = ?topic_id,
+                            new_topic_id = ?resolved_topic_id,
+                            "store reader: schema topic was recreated; rebuilding state"
+                        );
+                        reset_reader_state(&store_bg, &defaults, &applied_tx, &mut next, 0);
+                    }
                     topic_id = resolved_topic_id;
                     conn
                 }
@@ -389,7 +429,13 @@ pub fn spawn(
                                                 log_start_offset = offset,
                                                 "store reader: requested history was compacted away; resetting to log start"
                                             );
-                                            next = offset;
+                                            reset_reader_state(
+                                                &store_bg,
+                                                &defaults,
+                                                &applied_tx,
+                                                &mut next,
+                                                offset,
+                                            );
                                         }
                                         Err(reset_error) => {
                                             consecutive_failures += 1;
@@ -553,6 +599,44 @@ mod tests {
             .filter(|count| should_log_failure(*count))
             .collect();
         assert2::check!(logged == vec![1, 2, 4, 8, 16]);
+    }
+
+    #[test]
+    fn reset_discards_stale_state_and_rewinds_progress() {
+        let defaults = StoreState::default();
+        let store = RwLock::new(defaults.clone());
+        apply_record(
+            &store,
+            SchemaRecord::Schema(
+                SchemaKey::new("stale", SchemaVersion(1)),
+                SchemaValue {
+                    subject: "stale".into(),
+                    version: SchemaVersion(1),
+                    id: SchemaId(1),
+                    schema_type: None,
+                    message_type: None,
+                    references: vec![],
+                    schema: r#"{"type":"string"}"#.into(),
+                    deleted: false,
+                },
+            ),
+        );
+        let (applied_tx, applied_rx) = watch::channel(41);
+        let mut next = 42;
+
+        reset_reader_state(&store, &defaults, &applied_tx, &mut next, 7);
+
+        assert2::check!(store.read().versions("stale", true).is_none());
+        assert2::check!(next == 7);
+        assert2::check!(*applied_rx.borrow() == 6);
+    }
+
+    #[test]
+    fn leader_address_supports_ipv6_literals() {
+        assert2::check!(
+            resolve_leader_addr("::1", 9092, "_schemas").unwrap()
+                == "[::1]:9092".parse::<SocketAddr>().unwrap()
+        );
     }
 
     #[test]

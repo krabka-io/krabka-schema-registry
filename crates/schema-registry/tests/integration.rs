@@ -170,13 +170,16 @@ async fn startup_rejects_invalid_schema_topic_layout() {
         )
         .await
         .unwrap();
-    assert2::assert!(outcomes.iter().all(|outcome| outcome.error.is_none()));
+    assert2::assert!(
+        outcomes.iter().all(|outcome| outcome.error.is_none()),
+        "{outcomes:?}"
+    );
 
     for (topic, expected) in [
         ("_schemas", "must have exactly 1 partition; observed 2"),
         (
             "_schemas-delete",
-            "cleanup.policy must include compact; observed delete",
+            "cleanup.policy must be compact only; observed delete",
         ),
     ] {
         let result = tokio::time::timeout(
