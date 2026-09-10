@@ -1,20 +1,53 @@
 //! HTTP Basic credential store. It is the only new auth primitive, and the rest
 //! reuses `krabka-security`. A plaintext credential gives cp
 //! `PropertyFileLoginModule` parity. A `$2…` value is bcrypt-verified.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+#[derive(Clone)]
+struct BasicUser {
+    credential: String,
+    roles: Vec<String>,
+}
+
+impl BasicUser {
+    fn parse(value: &str) -> Self {
+        let mut fields = value.split(',');
+        Self {
+            credential: fields.next().unwrap_or_default().trim().to_owned(),
+            roles: fields
+                .map(str::trim)
+                .filter(|role| !role.is_empty())
+                .map(str::to_owned)
+                .collect(),
+        }
+    }
+}
 
 /// Username → credential map for HTTP Basic auth. A stored value that begins
 /// with `$2` is a bcrypt hash. Any other value is a plaintext password.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct BasicAuthStore {
-    users: HashMap<String, String>,
+    users: HashMap<String, BasicUser>,
+    required_roles: HashSet<String>,
+}
+
+impl std::fmt::Debug for BasicAuthStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BasicAuthStore")
+    }
 }
 
 impl BasicAuthStore {
     /// Build directly from an in-memory `user -> credential` map.
     #[must_use]
     pub fn from_users(users: HashMap<String, String>) -> Self {
-        Self { users }
+        Self {
+            users: users
+                .into_iter()
+                .map(|(user, credential)| (user, BasicUser::parse(&credential)))
+                .collect(),
+            required_roles: HashSet::new(),
+        }
     }
 
     /// Build from config. It reads the htpasswd-style `user:cred` file lines
@@ -32,26 +65,51 @@ impl BasicAuthStore {
                 if line.is_empty() || line.starts_with('#') {
                     continue;
                 }
-                if let Some((u, c)) = line.split_once(':') {
-                    users.insert(u.to_string(), c.to_string());
+                if let Some((user, credential)) = line.split_once(':') {
+                    let user = user.trim();
+                    if !user.is_empty() {
+                        users.insert(user.to_owned(), BasicUser::parse(credential));
+                    }
                 }
             }
         }
-        users.extend(cfg.users.clone());
-        Ok(Self { users })
+        users.extend(
+            cfg.users
+                .iter()
+                .map(|(user, credential)| (user.trim().to_owned(), BasicUser::parse(credential)))
+                .filter(|(user, _)| !user.is_empty()),
+        );
+        Ok(Self {
+            users,
+            required_roles: cfg.required_roles.clone(),
+        })
     }
 
-    /// Verify `user`/`pass`. A stored `$2…` value is bcrypt. Any other value
-    /// gets a constant-time plaintext compare.
+    /// Authenticate `user`/`pass` and return the user's configured roles.
+    #[must_use]
+    pub fn authenticate(&self, user: &str, pass: &str) -> Option<&[String]> {
+        let stored = self.users.get(user)?;
+        let credential_matches = if stored.credential.starts_with("$2") {
+            bcrypt::verify(pass, &stored.credential).unwrap_or(false)
+        } else {
+            constant_time_eq(stored.credential.as_bytes(), pass.as_bytes())
+        };
+        if !credential_matches
+            || (!self.required_roles.is_empty()
+                && !stored
+                    .roles
+                    .iter()
+                    .any(|role| self.required_roles.contains(role)))
+        {
+            return None;
+        }
+        Some(&stored.roles)
+    }
+
+    /// Verify `user`/`pass` and any configured role requirement.
     #[must_use]
     pub fn verify(&self, user: &str, pass: &str) -> bool {
-        let Some(stored) = self.users.get(user) else {
-            return false;
-        };
-        if stored.starts_with("$2") {
-            return bcrypt::verify(pass, stored).unwrap_or(false);
-        }
-        constant_time_eq(stored.as_bytes(), pass.as_bytes())
+        self.authenticate(user, pass).is_some()
     }
 }
 
@@ -110,6 +168,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             file: Some(path.clone()),
+            required_roles: HashSet::new(),
         };
         let store = BasicAuthStore::load(&cfg).unwrap();
         std::fs::remove_file(&path).ok();
@@ -142,6 +201,7 @@ mod tests {
         let cfg = crate::config::BasicAuthConfig {
             users: HashMap::new(),
             file: Some(path.clone()),
+            required_roles: HashSet::new(),
         };
         let store = BasicAuthStore::load(&cfg).unwrap();
         std::fs::remove_file(&path).ok();
@@ -165,8 +225,38 @@ mod tests {
             file: Some(std::path::PathBuf::from(
                 "/nonexistent/krabka-sr-basic-missing.htpasswd",
             )),
+            required_roles: HashSet::new(),
         };
         let err = BasicAuthStore::load(&cfg).expect_err("missing file must error");
         assert2::assert!(err.kind() == std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn cp_properties_roles_are_parsed_and_enforced() {
+        let path = std::env::temp_dir().join(format!(
+            "krabka-sr-basic-roles-{}.properties",
+            std::process::id()
+        ));
+        std::fs::write(&path, " alice : pw , admin , developer\nbob: other,user\n").unwrap();
+        let cfg = crate::config::BasicAuthConfig {
+            users: HashMap::new(),
+            file: Some(path.clone()),
+            required_roles: ["admin".to_owned()].into_iter().collect(),
+        };
+        let store = BasicAuthStore::load(&cfg).unwrap();
+        std::fs::remove_file(path).ok();
+
+        for (user, password, expected) in [
+            ("alice", "pw", true),
+            ("alice", "pw,admin", false),
+            ("bob", "other", false),
+        ] {
+            assert2::assert!(store.verify(user, password) == expected);
+        }
+        assert2::assert!(
+            store.authenticate("alice", "pw").unwrap()
+                == ["admin".to_owned(), "developer".to_owned()]
+        );
+        assert2::assert!(format!("{store:?}") == "BasicAuthStore");
     }
 }

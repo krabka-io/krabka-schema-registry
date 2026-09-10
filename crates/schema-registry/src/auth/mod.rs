@@ -103,11 +103,11 @@ pub async fn resolve(
         let Some((user, pass)) = text.split_once(':') else {
             return AuthDecision::Unauthorized;
         };
-        if store.verify(user, pass) {
+        if let Some(roles) = store.authenticate(user, pass) {
             return AuthDecision::Authn(Principal {
                 name: user.to_string(),
                 auth_method: AuthMethod::SaslPlain,
-                groups: Vec::new(),
+                groups: roles.to_vec(),
             });
         }
         return AuthDecision::Unauthorized;
@@ -404,8 +404,8 @@ mod tests {
         }
     }
 
-    /// cp-byte-exact pin. This test drives `auth_layer` with Basic configured
-    /// over a tiny router with NO credentials, and asserts that the `401`
+    /// cp-byte-exact pin. This test drives `auth_layer` with a valid password
+    /// but a non-permitted role, and asserts that the `401`
     /// matches `mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0`
     /// (`tests/fixtures/auth/basic.json`) byte-for-byte:
     ///
@@ -425,12 +425,16 @@ mod tests {
 
         // The realm cp emitted in the capture (its `authentication.realm` = the
         // JAAS entry name). Our binary defaults to the same value.
+        let store = BasicAuthStore::load(&crate::config::BasicAuthConfig {
+            users: [("alice".to_string(), "pw,user".to_string())]
+                .into_iter()
+                .collect(),
+            required_roles: ["admin".to_string()].into_iter().collect(),
+            ..Default::default()
+        })
+        .unwrap();
         let st = AuthState {
-            basic: Some(Arc::new(BasicAuthStore::from_users(
-                [("alice".to_string(), "pw".to_string())]
-                    .into_iter()
-                    .collect(),
-            ))),
+            basic: Some(Arc::new(store)),
             bearer: None,
             require_auth: true,
             realm: "SchemaRegistry-Props".to_string(),
@@ -445,6 +449,7 @@ mod tests {
 
         let req = Request::builder()
             .uri("/subjects")
+            .header(header::AUTHORIZATION, basic_b64("alice", "pw"))
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();

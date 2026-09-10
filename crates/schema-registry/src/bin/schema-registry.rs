@@ -33,7 +33,7 @@ use krabka_units::{parse, prelude::*};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-#[derive(Debug, Parser)]
+#[derive(Parser)]
 #[command(
     name = "krabka-schema-registry",
     version,
@@ -199,8 +199,19 @@ struct Args {
     basic_auth_file: Option<PathBuf>,
     /// Inline Basic credential as `user:cred` (repeatable). Same cred format as
     /// `--basic-auth-file`. Enables Basic auth even without a file.
-    #[arg(long = "basic-user", value_name = "USER:CRED")]
+    #[arg(
+        long = "basic-user",
+        env = "SCHEMA_REGISTRY_BASIC_USERS",
+        value_name = "USER:CRED"
+    )]
     basic_users: Vec<String>,
+    /// Role permitted to authenticate with Basic (repeatable).
+    #[arg(
+        long = "auth-roles",
+        env = "SCHEMA_REGISTRY_AUTH_ROLES",
+        value_delimiter = ','
+    )]
+    auth_roles: Vec<String>,
 
     // ── Bearer (OAuth) ──────────────────────────────────────────────────────
     /// Bearer-token mode: `off` | `unsecured`. `unsecured` accepts unsigned
@@ -263,7 +274,12 @@ struct Args {
     #[arg(long, env = "SCHEMA_REGISTRY_AUTHZ", default_value_t = false)]
     authz: bool,
     /// Super-user principal name that bypasses ACL checks (repeatable).
-    #[arg(long = "super-user", value_name = "NAME")]
+    #[arg(
+        long = "super-user",
+        env = "SCHEMA_REGISTRY_SUPER_USERS",
+        value_name = "NAME",
+        value_delimiter = ','
+    )]
     super_users: Vec<String>,
     /// ACL-cache refresh interval, with a unit (`30s`).
     #[arg(
@@ -296,6 +312,9 @@ struct Args {
     /// SASL password (PLAIN / SCRAM).
     #[arg(long, env = "SCHEMA_REGISTRY_KAFKA_SASL_PASSWORD")]
     kafka_sasl_password: Option<String>,
+    /// File containing the SASL password (PLAIN / SCRAM).
+    #[arg(long, env = "SCHEMA_REGISTRY_KAFKA_SASL_PASSWORD_FILE")]
+    kafka_sasl_password_file: Option<PathBuf>,
     /// GSSAPI keytab containing the client principal's long-term key.
     #[arg(long, env = "SCHEMA_REGISTRY_KAFKA_SASL_KEYTAB_PATH")]
     kafka_sasl_keytab_path: Option<PathBuf>,
@@ -555,6 +574,7 @@ impl Args {
             realm: self.realm.clone(),
             basic_auth_file: self.basic_auth_file.clone(),
             basic_users: self.basic_users.clone(),
+            auth_roles: self.auth_roles.clone(),
             bearer: self.bearer.clone(),
             bearer_principal_claim: self.bearer_principal_claim.clone(),
             jwks_endpoint_uri: self.bearer_jwks_endpoint_uri.clone(),
@@ -574,6 +594,7 @@ impl Args {
             kafka_sasl_mechanism: self.kafka_sasl_mechanism.clone(),
             kafka_sasl_username: self.kafka_sasl_username.clone(),
             kafka_sasl_password: self.kafka_sasl_password.clone(),
+            kafka_sasl_password_file: self.kafka_sasl_password_file.clone(),
             kafka_sasl_keytab_path: self.kafka_sasl_keytab_path.clone(),
             kafka_sasl_client_principal: self.kafka_sasl_client_principal.clone(),
             kafka_sasl_service_name: Some(self.kafka_sasl_service_name.clone()),
@@ -728,6 +749,49 @@ mod tests {
                 && kdc_url == "tcp://kdc.example.com:88"
         ));
         assert!(client.sasl_host.as_deref() == Some("broker.internal"));
+    }
+
+    #[test]
+    fn auth_values_and_sasl_password_file_parse_from_environment() {
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("environment lock");
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "broker-secret\n").unwrap();
+        temp_env::with_vars(
+            [
+                ("SCHEMA_REGISTRY_BASIC_USERS", Some("alice:pw,admin")),
+                ("SCHEMA_REGISTRY_AUTH_ROLES", Some("admin,developer")),
+                ("SCHEMA_REGISTRY_SUPER_USERS", Some("root,operator")),
+                (
+                    "SCHEMA_REGISTRY_KAFKA_SASL_PASSWORD_FILE",
+                    file.path().to_str(),
+                ),
+            ],
+            || {
+                let args = Args::try_parse_from([
+                    "krabka-schema-registry",
+                    "--bootstrap-servers=localhost:9092",
+                    "--kafka-security-protocol=SASL_PLAINTEXT",
+                    "--kafka-sasl-username=registry",
+                ])
+                .unwrap();
+                assert!(args.basic_users == ["alice:pw,admin"]);
+                assert!(args.auth_roles == ["admin", "developer"]);
+                assert!(args.super_users == ["root", "operator"]);
+                assert!(args.kafka_sasl_password_file.as_deref() == Some(file.path()));
+                let client = build_security(&args.security_input())
+                    .unwrap()
+                    .config
+                    .client
+                    .unwrap();
+                assert!(matches!(
+                    client.sasl,
+                    Some(SaslCredentials::Plain { password, .. }) if password == "broker-secret"
+                ));
+            },
+        );
     }
 
     #[test]
