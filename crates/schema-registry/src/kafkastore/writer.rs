@@ -5,6 +5,7 @@ use bytes::Bytes;
 use krabka_client_core::ClientSecurity;
 use krabka_client_producer::{Acks, ConsumerGroupMetadata, Producer, ProducerRecord};
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
 use crate::config::RegistryConfig;
 
@@ -81,12 +82,15 @@ impl SchemaWriter {
     /// # Errors
     ///
     /// Returns an error when the record cannot be produced or acknowledged.
-    pub async fn barrier(&self) -> anyhow::Result<i64> {
+    pub async fn barrier(&self) -> anyhow::Result<Uuid> {
+        let token = Uuid::new_v4();
+        let value = format!(r#"{{"barrier":"{token}"}}"#);
         self.produce_unfenced(
             br#"{"keytype":"NOOP","magic":0}"#.to_vec(),
-            Some(b"{}".to_vec()),
+            Some(value.into_bytes()),
         )
-        .await
+        .await?;
+        Ok(token)
     }
 
     async fn produce_unfenced(&self, key: Vec<u8>, value: Option<Vec<u8>>) -> anyhow::Result<i64> {

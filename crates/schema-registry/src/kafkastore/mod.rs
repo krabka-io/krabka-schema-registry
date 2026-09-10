@@ -34,7 +34,7 @@ const VALID_MODES: &[&str] = &["READWRITE", "READONLY", "IMPORT"];
 /// it. That wait gives read-your-writes.
 pub struct KafkaStore {
     pub store: Arc<RwLock<StoreState>>,
-    applied_rx: watch::Receiver<i64>,
+    applied_rx: watch::Receiver<Option<uuid::Uuid>>,
     writer: writer::SchemaWriter,
     write_gate: Mutex<()>,
     schemas_topic: String,
@@ -106,7 +106,14 @@ impl KafkaStore {
     async fn prepare_write(
         &self,
     ) -> Result<Option<krabka_client_producer::ConsumerGroupMetadata>, SrError> {
-        let Some(primary) = self.primary.read().clone() else {
+        let primary = self.primary.read().clone();
+        let Some(primary) = primary else {
+            let barrier = self
+                .writer
+                .barrier()
+                .await
+                .map_err(|error| SrError::Backend(error.to_string()))?;
+            self.await_barrier(barrier).await?;
             return Ok(None);
         };
         let before = primary.borrow().clone();
@@ -131,7 +138,7 @@ impl KafkaStore {
             .barrier()
             .await
             .map_err(|error| SrError::Backend(error.to_string()))?;
-        self.await_applied(barrier).await?;
+        self.await_barrier(barrier).await?;
 
         let after = primary.borrow().clone();
         if !after.is_primary
@@ -628,10 +635,19 @@ impl KafkaStore {
         Ok(())
     }
 
-    /// Block until the reader has applied the record at `offset`.
-    async fn await_applied(&self, offset: i64) -> Result<(), SrError> {
+    /// Order a unique marker after the write and wait until the reader sees it.
+    async fn await_applied(&self, _offset: i64) -> Result<(), SrError> {
+        let barrier = self
+            .writer
+            .barrier()
+            .await
+            .map_err(|error| SrError::Backend(error.to_string()))?;
+        self.await_barrier(barrier).await
+    }
+
+    async fn await_barrier(&self, barrier: uuid::Uuid) -> Result<(), SrError> {
         let mut rx = self.applied_rx.clone();
-        while *rx.borrow() < offset {
+        while *rx.borrow() != Some(barrier) {
             if rx.changed().await.is_err() {
                 return Err(SrError::Backend(
                     "schema-store reader stopped before applying the write".into(),
@@ -649,11 +665,11 @@ impl KafkaStore {
 }
 
 async fn await_applied_rx(
-    mut rx: watch::Receiver<i64>,
-    offset: i64,
+    mut rx: watch::Receiver<Option<uuid::Uuid>>,
+    barrier: uuid::Uuid,
     cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
-    while *rx.borrow() < offset {
+    while *rx.borrow() != Some(barrier) {
         tokio::select! {
             biased;
             () = cancel.cancelled() => anyhow::bail!("schema-store startup cancelled during replay"),
@@ -663,4 +679,24 @@ async fn await_applied_rx(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use uuid::Uuid;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn barrier_wait_rejects_an_unrelated_marker() {
+        let wanted = Uuid::new_v4();
+        let (tx, rx) = watch::channel(Some(Uuid::new_v4()));
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(async move { await_applied_rx(rx, wanted, &cancel).await });
+
+        tokio::task::yield_now().await;
+        assert2::check!(!task.is_finished());
+        tx.send(Some(wanted)).unwrap();
+        task.await.unwrap().unwrap();
+    }
 }

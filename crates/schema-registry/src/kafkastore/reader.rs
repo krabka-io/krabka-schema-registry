@@ -26,6 +26,7 @@ use krabka_units::prelude::*;
 use parking_lot::RwLock;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use crate::{
     config::{RegistryConfig, RegistryRuntimeConfig},
@@ -36,8 +37,13 @@ use crate::{
 /// Shared state + offset watch returned by [`spawn`].
 pub struct StoreReader {
     pub store: Arc<RwLock<StoreState>>,
-    pub applied_rx: watch::Receiver<i64>,
+    pub applied_rx: watch::Receiver<Option<Uuid>>,
     failures: Arc<AtomicU64>,
+}
+
+struct Rebuild {
+    store: RwLock<StoreState>,
+    end_offset: i64,
 }
 
 impl StoreReader {
@@ -86,36 +92,28 @@ fn fetch_error_action(e: &ClientError) -> FetchErrorAction {
     }
 }
 
-fn resolve_bootstrap_addrs(bootstrap: &str) -> Vec<SocketAddr> {
-    bootstrap
-        .split(',')
-        .filter_map(|b| b.trim().to_socket_addrs().ok())
-        .flatten()
-        .collect()
-}
-
 fn should_log_failure(consecutive: u64) -> bool {
     consecutive == 1 || consecutive.is_power_of_two()
 }
 
-async fn connect_topic_leader(
-    bootstrap: &str,
-    opts: &ConnectionOptions,
+fn resolve_leader_addr(host: &str, port: i32, topic: &str) -> Result<SocketAddr, ClientError> {
+    let port = u16::try_from(port).map_err(|_| {
+        ClientError::InvalidConfig(format!("invalid leader port {port} for {topic}-0"))
+    })?;
+    (host, port)
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut addrs| addrs.next())
+        .ok_or_else(|| {
+            ClientError::InvalidConfig(format!("cannot resolve leader {host}:{port} for {topic}-0"))
+        })
+}
+
+async fn topic_route(
+    conn: &Connection,
     topic: &str,
     current_topic_id: WireUuid,
-) -> Result<(Connection, WireUuid), ClientError> {
-    let mut last_error = ClientError::Disconnected;
-    let mut bootstrap_conn = None;
-    for addr in resolve_bootstrap_addrs(bootstrap) {
-        match Connection::connect_with_options(addr, opts.clone()).await {
-            Ok(conn) => {
-                bootstrap_conn = Some(conn);
-                break;
-            }
-            Err(error) => last_error = error,
-        }
-    }
-    let conn = bootstrap_conn.ok_or(last_error)?;
+) -> Result<(WireUuid, Option<SocketAddr>), ClientError> {
     let metadata = conn
         .send(MetadataRequest {
             topics: Some(vec![MetadataRequestTopic {
@@ -157,26 +155,53 @@ async fn connect_topic_leader(
         .iter()
         .find(|broker| broker.node_id == partition.leader_id && broker.port > 0)
     else {
-        return Ok((conn, topic_id));
+        return Ok((topic_id, None));
     };
-    let Some(addr) = format!("{}:{}", leader.host, leader.port)
-        .to_socket_addrs()
-        .ok()
-        .and_then(|mut addrs| addrs.next())
-    else {
-        return Err(ClientError::InvalidConfig(format!(
-            "cannot resolve leader {}:{} for {topic}-0",
-            leader.host, leader.port
-        )));
-    };
-    conn.close();
     Ok((
-        Connection::connect_with_options(addr, opts.clone()).await?,
         topic_id,
+        Some(resolve_leader_addr(&leader.host, leader.port, topic)?),
     ))
 }
 
-async fn log_start_offset(conn: &Connection, topic: &str) -> Result<i64, ClientError> {
+async fn connect_topic_leader(
+    bootstrap: &str,
+    opts: &ConnectionOptions,
+    topic: &str,
+    current_topic_id: WireUuid,
+) -> Result<(Connection, WireUuid), ClientError> {
+    let mut last_error = ClientError::Disconnected;
+    for bootstrap_host in bootstrap.split(',').map(str::trim) {
+        let Ok(addrs) = bootstrap_host.to_socket_addrs() else {
+            continue;
+        };
+        for addr in addrs {
+            let conn = match Connection::connect_with_options(addr, opts.clone()).await {
+                Ok(conn) => conn,
+                Err(error) => {
+                    last_error = error;
+                    continue;
+                }
+            };
+            match topic_route(&conn, topic, current_topic_id).await {
+                Ok((topic_id, None)) => return Ok((conn, topic_id)),
+                Ok((topic_id, Some(leader_addr))) => {
+                    conn.close();
+                    match Connection::connect_with_options(leader_addr, opts.clone()).await {
+                        Ok(leader) => return Ok((leader, topic_id)),
+                        Err(error) => last_error = error,
+                    }
+                }
+                Err(error) => {
+                    conn.close();
+                    last_error = error;
+                }
+            }
+        }
+    }
+    Err(last_error)
+}
+
+async fn log_offset(conn: &Connection, topic: &str, timestamp: i64) -> Result<i64, ClientError> {
     let response = conn
         .send(ListOffsetsRequest {
             replica_id: -1,
@@ -185,7 +210,7 @@ async fn log_start_offset(conn: &Connection, topic: &str) -> Result<i64, ClientE
                 name: topic.to_owned(),
                 partitions: vec![ListOffsetsPartition {
                     partition_index: 0,
-                    timestamp: -2,
+                    timestamp,
                     ..Default::default()
                 }],
                 ..Default::default()
@@ -212,11 +237,60 @@ async fn log_start_offset(conn: &Connection, topic: &str) -> Result<i64, ClientE
     Ok(partition.offset)
 }
 
+async fn log_bounds(conn: &Connection, topic: &str) -> Result<(i64, i64), ClientError> {
+    Ok((
+        log_offset(conn, topic, -2).await?,
+        log_offset(conn, topic, -1).await?,
+    ))
+}
+
 async fn sleep_or_cancel(cancel: &CancellationToken, duration: Time) -> bool {
     tokio::select! {
         biased;
         () = cancel.cancelled() => true,
         () = tokio::time::sleep(duration.to_std()) => false,
+    }
+}
+
+fn begin_rebuild(
+    store: &RwLock<StoreState>,
+    defaults: &StoreState,
+    next: &mut i64,
+    start_offset: i64,
+    end_offset: i64,
+    preserve_id_high_water: bool,
+) -> Option<Rebuild> {
+    let mut snapshot = defaults.clone();
+    if preserve_id_high_water {
+        snapshot.preserve_id_high_water(&store.read());
+    }
+    *next = start_offset;
+    if start_offset >= end_offset {
+        *store.write() = snapshot;
+        return None;
+    }
+    Some(Rebuild {
+        store: RwLock::new(snapshot),
+        end_offset,
+    })
+}
+
+fn barrier_token(key: &[u8], value: Option<&[u8]>) -> Option<Uuid> {
+    let key: serde_json::Value = serde_json::from_slice(key).ok()?;
+    if key.get("keytype")?.as_str()? != "NOOP" {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_slice(value?).ok()?;
+    value.get("barrier")?.as_str()?.parse().ok()
+}
+
+fn complete_rebuild(live: &RwLock<StoreState>, rebuild: &mut Option<Rebuild>, next: i64) {
+    if rebuild
+        .as_ref()
+        .is_some_and(|snapshot| next >= snapshot.end_offset)
+        && let Some(snapshot) = rebuild.take()
+    {
+        *live.write() = snapshot.store.into_inner();
     }
 }
 
@@ -284,8 +358,9 @@ pub fn spawn(
     security: Option<ClientSecurity>,
     cancel: CancellationToken,
 ) -> StoreReader {
+    let defaults = initial_state.clone();
     let store = Arc::new(RwLock::new(initial_state));
-    let (applied_tx, applied_rx) = watch::channel(-1_i64);
+    let (applied_tx, applied_rx) = watch::channel(None);
     let topic = cfg.schemas_topic.clone();
     let bootstrap = cfg.bootstrap.clone();
     let client_id = format!("{}-reader", cfg.client_id);
@@ -306,10 +381,42 @@ pub fn spawn(
         };
         let mut next = 0_i64;
         let mut topic_id = topic_id;
+        let mut rebuild = None;
+        let mut last_barrier = None;
         let mut consecutive_failures = 0_u64;
         loop {
             let conn = match connect_topic_leader(&bootstrap, &opts, &topic, topic_id).await {
                 Ok((conn, resolved_topic_id)) => {
+                    if topic_id != WireUuid::ZERO && resolved_topic_id != topic_id {
+                        tracing::warn!(
+                            old_topic_id = ?topic_id,
+                            new_topic_id = ?resolved_topic_id,
+                            "store reader: schema topic was recreated; rebuilding state"
+                        );
+                        match log_bounds(&conn, &topic).await {
+                            Ok((start, end)) => {
+                                rebuild = begin_rebuild(
+                                    &store_bg, &defaults, &mut next, start, end, false,
+                                );
+                            }
+                            Err(error) => {
+                                conn.close();
+                                consecutive_failures += 1;
+                                failures_bg.fetch_add(1, Ordering::Relaxed);
+                                if should_log_failure(consecutive_failures) {
+                                    tracing::warn!(
+                                        error = %error,
+                                        consecutive_failures,
+                                        "store reader: replacement topic bounds failed; backing off"
+                                    );
+                                }
+                                if sleep_or_cancel(&cancel, policy.retry_backoff).await {
+                                    return;
+                                }
+                                continue;
+                            }
+                        }
+                    }
                     topic_id = resolved_topic_id;
                     conn
                 }
@@ -356,17 +463,25 @@ pub fn spawn(
                                         continue;
                                     }
                                     let key = r.key.as_deref().unwrap_or_default();
-                                    apply_record(
-                                        &store_bg,
-                                        SchemaRecord::decode(key, r.value.as_deref()),
-                                    );
+                                    if let Some(token) = barrier_token(key, r.value.as_deref()) {
+                                        last_barrier = Some(token);
+                                    }
+                                    let record = SchemaRecord::decode(key, r.value.as_deref());
+                                    if let Some(rebuild) = &mut rebuild {
+                                        apply_record(&rebuild.store, record);
+                                    } else {
+                                        apply_record(&store_bg, record);
+                                    }
                                 }
                                 if let Some(cursor) = progress.next_offset {
                                     next = next.max(cursor);
+                                    complete_rebuild(&store_bg, &mut rebuild, next);
                                     // Publish cursor progress after all visible
                                     // records have been applied. This also
                                     // advances over aborted/control batches.
-                                    let _ = applied_tx.send(next - 1);
+                                    if rebuild.is_none() {
+                                        let _ = applied_tx.send(last_barrier);
+                                    }
                                 }
                             }
                             Err(error) => {
@@ -382,14 +497,21 @@ pub fn spawn(
                                     );
                                 }
                                 if action == FetchErrorAction::ResetToLogStart {
-                                    match log_start_offset(&conn, &topic).await {
-                                        Ok(offset) => {
+                                    match log_bounds(&conn, &topic).await {
+                                        Ok((start, end)) => {
                                             tracing::warn!(
                                                 fetch_offset = next,
-                                                log_start_offset = offset,
+                                                log_start_offset = start,
                                                 "store reader: requested history was compacted away; resetting to log start"
                                             );
-                                            next = offset;
+                                            rebuild = begin_rebuild(
+                                                &store_bg,
+                                                &defaults,
+                                                &mut next,
+                                                start,
+                                                end,
+                                                true,
+                                            );
                                         }
                                         Err(reset_error) => {
                                             consecutive_failures += 1;
@@ -553,6 +675,101 @@ mod tests {
             .filter(|count| should_log_failure(*count))
             .collect();
         assert2::check!(logged == vec![1, 2, 4, 8, 16]);
+    }
+
+    #[test]
+    fn rebuild_keeps_live_state_until_snapshot_is_complete() {
+        let defaults = StoreState::default();
+        let store = RwLock::new(defaults.clone());
+        apply_record(
+            &store,
+            SchemaRecord::Schema(
+                SchemaKey::new("stale", SchemaVersion(1)),
+                SchemaValue {
+                    subject: "stale".into(),
+                    version: SchemaVersion(1),
+                    id: SchemaId(1),
+                    schema_type: None,
+                    message_type: None,
+                    references: vec![],
+                    schema: r#"{"type":"string"}"#.into(),
+                    deleted: false,
+                },
+            ),
+        );
+        let mut next = 42;
+
+        let mut rebuild = begin_rebuild(&store, &defaults, &mut next, 7, 9, false);
+
+        assert2::check!(store.read().versions("stale", true).is_some());
+        assert2::check!(
+            rebuild
+                .as_ref()
+                .unwrap()
+                .store
+                .read()
+                .versions("stale", true)
+                .is_none()
+        );
+        assert2::check!(next == 7);
+        complete_rebuild(&store, &mut rebuild, 8);
+        assert2::check!(store.read().versions("stale", true).is_some());
+        complete_rebuild(&store, &mut rebuild, 9);
+        assert2::check!(store.read().versions("stale", true).is_none());
+        assert2::check!(rebuild.is_none());
+    }
+
+    #[test]
+    fn same_topic_rebuild_preserves_id_high_water() {
+        let defaults = StoreState::default();
+        let store = RwLock::new(defaults.clone());
+        apply_record(
+            &store,
+            SchemaRecord::Schema(
+                SchemaKey::new("old", SchemaVersion(1)),
+                SchemaValue {
+                    subject: "old".into(),
+                    version: SchemaVersion(1),
+                    id: SchemaId(7),
+                    schema_type: None,
+                    message_type: None,
+                    references: vec![],
+                    schema: r#"{"type":"string"}"#.into(),
+                    deleted: false,
+                },
+            ),
+        );
+        let mut next = 42;
+
+        let rebuild = begin_rebuild(&store, &defaults, &mut next, 7, 9, true).unwrap();
+        let registered = rebuild
+            .store
+            .write()
+            .register("new", SchemaType::Avro, r#"{"type":"int"}"#, &[], None)
+            .unwrap();
+
+        assert2::check!(registered.id == SchemaId(8));
+    }
+
+    #[test]
+    fn barrier_tokens_are_read_from_noop_values() {
+        let token = Uuid::new_v4();
+        let value = format!(r#"{{"barrier":"{token}"}}"#);
+        assert2::check!(
+            barrier_token(br#"{"keytype":"NOOP","magic":0}"#, Some(value.as_bytes()),)
+                == Some(token)
+        );
+        assert2::check!(
+            barrier_token(br#"{"keytype":"CONFIG"}"#, Some(value.as_bytes())).is_none()
+        );
+    }
+
+    #[test]
+    fn leader_address_supports_ipv6_literals() {
+        assert2::check!(
+            resolve_leader_addr("::1", 9092, "_schemas").unwrap()
+                == "[::1]:9092".parse::<SocketAddr>().unwrap()
+        );
     }
 
     #[test]
