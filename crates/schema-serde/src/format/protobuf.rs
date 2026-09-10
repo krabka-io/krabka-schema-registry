@@ -139,6 +139,11 @@ fn proto_source(descriptor: &prost_reflect::MessageDescriptor) -> String {
 }
 
 /// Compute the Confluent message-index path of `descriptor` within its file.
+///
+/// # Errors
+///
+/// Returns a schema error if the descriptor cannot be reached from its parent
+/// file's top-level message list.
 pub fn message_index(descriptor: &MessageDescriptor) -> Result<Vec<i32>, SchemaSerdeError> {
     let file = descriptor.parent_file();
     message_index_in(file.messages(), descriptor.full_name()).ok_or_else(|| {
@@ -248,7 +253,7 @@ fn write_message(
         !nested
             .options
             .as_ref()
-            .is_some_and(|options| options.map_entry())
+            .is_some_and(prost_reflect::prost_types::MessageOptions::map_entry)
     }) {
         write_message(out, nested, depth + 1, package, syntax);
     }
@@ -348,7 +353,7 @@ fn map_entry<'a>(
             && nested
                 .options
                 .as_ref()
-                .is_some_and(|options| options.map_entry())
+                .is_some_and(prost_reflect::prost_types::MessageOptions::map_entry)
     })
 }
 
@@ -393,16 +398,16 @@ fn write_service(out: &mut String, service: &ServiceDescriptorProto, package: &s
         service.name.as_deref().unwrap_or("Unknown")
     );
     for method in &service.method {
-        let input_prefix = method
-            .client_streaming
-            .unwrap_or(false)
-            .then_some("stream ")
-            .unwrap_or("");
-        let output_prefix = method
-            .server_streaming
-            .unwrap_or(false)
-            .then_some("stream ")
-            .unwrap_or("");
+        let input_prefix = if method.client_streaming.unwrap_or(false) {
+            "stream "
+        } else {
+            ""
+        };
+        let output_prefix = if method.server_streaming.unwrap_or(false) {
+            "stream "
+        } else {
+            ""
+        };
         let input = proto_ref_name(method.input_type.as_deref().unwrap_or("Unknown"), package);
         let output = proto_ref_name(method.output_type.as_deref().unwrap_or("Unknown"), package);
         let _ = writeln!(
@@ -420,6 +425,7 @@ mod tests {
     use prost_reflect::prost_types::{DescriptorProto, FieldDescriptorProto, FileDescriptorProto};
 
     use super::{ProtobufSerde, normalize};
+    use super::{message_index, message_index_in};
     use crate::format::SchemaDeserializer;
 
     #[test]
@@ -446,6 +452,39 @@ mod tests {
                 text.contains("id = 1;"),
             ) == (true, true, true)
         );
+    }
+
+    #[test]
+    fn complex_descriptor_round_trips_and_nested_index_is_exact() {
+        let source = r#"
+            syntax = "proto3";
+            package demo;
+            message Outer {
+              enum Kind { KIND_UNSPECIFIED = 0; KIND_READY = 1; }
+              message Inner { string name = 1; }
+              repeated Inner items = 1;
+              Kind kind = 2;
+              oneof choice { string text = 3; int64 number = 4; }
+              map<string, int32> counts = 5;
+            }
+        "#;
+        let file = protox_parse::parse("complex.proto", source).unwrap();
+        let rendered = normalize(&file);
+        check!(
+            protox_parse::parse("complex.proto", &rendered).is_ok(),
+            "{rendered}"
+        );
+        check!(rendered.contains("repeated Inner items = 1;"));
+        check!(rendered.contains("oneof choice"));
+        check!(rendered.contains("map<string, int32> counts = 5;"));
+
+        let pool = prost_reflect::DescriptorPool::from_file_descriptor_set(
+            prost_reflect::prost_types::FileDescriptorSet { file: vec![file] },
+        )
+        .unwrap();
+        let inner = pool.get_message_by_name("demo.Outer.Inner").unwrap();
+        check!(message_index(&inner).unwrap() == vec![0, 0]);
+        check!(message_index_in(inner.parent_file().messages(), "demo.Missing").is_none());
     }
 
     #[test]

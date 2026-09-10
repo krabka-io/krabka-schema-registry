@@ -6,7 +6,7 @@
 use std::{marker::PhantomData, sync::Arc};
 
 use apache_avro::{
-    AvroSchema, from_avro_datum, from_value, schema::Schema, to_avro_datum, to_value,
+    AvroSchema, from_avro_datum_schemata, from_value, schema::Schema, to_avro_datum, to_value,
 };
 use bytes::Bytes;
 use serde::{Serialize, de::DeserializeOwned};
@@ -122,9 +122,15 @@ where
         let writer_schema = schemas
             .last()
             .ok_or_else(|| SchemaSerdeError::Schema("empty Avro schema set".into()))?;
+        let writer_schemata = schemas.iter().collect();
         let mut cursor = body;
-        let value = from_avro_datum(writer_schema, &mut cursor, Some(&self.reader_schema))
-            .map_err(|e| SchemaSerdeError::Deserialize(e.to_string()))?;
+        let value = from_avro_datum_schemata(
+            writer_schema,
+            writer_schemata,
+            &mut cursor,
+            Some(&self.reader_schema),
+        )
+        .map_err(|e| SchemaSerdeError::Deserialize(e.to_string()))?;
         from_value::<T>(&value).map_err(|e| SchemaSerdeError::Deserialize(e.to_string()))
     }
 }
@@ -134,6 +140,7 @@ mod tests {
     use apache_avro::AvroSchema;
     use assert2::check;
     use serde::{Deserialize, Serialize};
+    use std::collections::HashMap;
 
     use super::*;
     use crate::{
@@ -145,6 +152,16 @@ mod tests {
     struct Order {
         id: String,
         total: f64,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, AvroSchema)]
+    struct Money {
+        cents: i64,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, AvroSchema)]
+    struct Invoice {
+        total: Money,
     }
 
     #[test]
@@ -163,5 +180,31 @@ mod tests {
         check!((&framed[..5]) == [0x00, 0x00, 0x00, 0x00, 0x0b]);
         let back: Order = serde.deserialize("orders", &framed).unwrap();
         check!(back == order);
+    }
+
+    #[test]
+    fn decodes_writer_schema_with_cached_reference() {
+        let cache = SchemaCache::new(RegistryClient::new("http://unused"), CacheConfig::default());
+        let serde = AvroSerde::<Invoice>::value(&cache);
+        let money = r#"{"type":"record","name":"Money","fields":[{"name":"cents","type":"long"}]}"#;
+        let invoice =
+            r#"{"type":"record","name":"Invoice","fields":[{"name":"total","type":"Money"}]}"#;
+        cache.seed_writer_schema_with_references(
+            12,
+            invoice,
+            HashMap::from([("money.avsc".into(), money.into())]),
+        );
+        // One nested record containing long 19: records add no bytes and Avro
+        // zig-zag encodes 19 as 38.
+        let body = [38];
+        let decoded = serde
+            .deserialize("invoices", &wire::encode(12, &body))
+            .unwrap();
+        check!(
+            decoded
+                == Invoice {
+                    total: Money { cents: 19 }
+                }
+        );
     }
 }

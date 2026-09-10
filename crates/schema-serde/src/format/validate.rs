@@ -176,6 +176,61 @@ pub fn validate_protobuf(
     Ok(())
 }
 
+/// Check a Protobuf body using registry-cached import sources.
+///
+/// # Errors
+///
+/// Returns a schema error when a source does not parse or imports do not link,
+/// and a deserialize error when the body does not match the indexed message.
+#[cfg(feature = "protobuf")]
+pub fn validate_protobuf_with_references<S: std::hash::BuildHasher>(
+    schema: &str,
+    references: &std::collections::HashMap<String, String, S>,
+    message_index: &[i32],
+    body: &[u8],
+) -> Result<(), SchemaSerdeError> {
+    use prost_reflect::{DescriptorPool, DynamicMessage, prost_types::FileDescriptorSet};
+
+    let mut files = Vec::with_capacity(references.len() + 1);
+    for (name, source) in references {
+        files.push(
+            protox_parse::parse(name, source)
+                .map_err(|error| SchemaSerdeError::Schema(format!("protobuf schema: {error}")))?,
+        );
+    }
+    files.push(
+        protox_parse::parse("schema.proto", schema)
+            .map_err(|error| SchemaSerdeError::Schema(format!("protobuf schema: {error}")))?,
+    );
+    let pool = DescriptorPool::from_file_descriptor_set(FileDescriptorSet { file: files })
+        .map_err(|error| SchemaSerdeError::Schema(format!("protobuf link: {error}")))?;
+    let file = pool
+        .get_file_by_name("schema.proto")
+        .ok_or_else(|| SchemaSerdeError::Schema("protobuf root file missing".into()))?;
+    let path = if message_index.is_empty() {
+        &[0][..]
+    } else {
+        message_index
+    };
+    let missing =
+        || SchemaSerdeError::Schema(format!("protobuf message-index {path:?} names no message"));
+    let (&first, rest) = path.split_first().ok_or_else(missing)?;
+    let mut descriptor = file
+        .messages()
+        .nth(usize::try_from(first).map_err(|_| missing())?)
+        .ok_or_else(missing)?;
+    for &step in rest {
+        let child = descriptor
+            .child_messages()
+            .nth(usize::try_from(step).map_err(|_| missing())?)
+            .ok_or_else(missing)?;
+        descriptor = child;
+    }
+    DynamicMessage::decode(descriptor, body)
+        .map_err(|error| SchemaSerdeError::Deserialize(format!("protobuf body: {error}")))?;
+    Ok(())
+}
+
 /// Walk a Confluent message-index path to the message it names.
 #[cfg(feature = "protobuf")]
 fn message_at(
@@ -236,6 +291,8 @@ pub fn validate_json(schema: &str, body: &[u8]) -> Result<(), SchemaSerdeError> 
 // at least one is compiled in.
 #[cfg(all(test, any(feature = "avro", feature = "protobuf", feature = "json")))]
 mod tests {
+    #[cfg(feature = "protobuf")]
+    use std::collections::HashMap;
     // `assert!` only appears in the Avro and Protobuf cases; the JSON ones
     // check a plain `Result`.
     #[cfg(any(feature = "avro", feature = "protobuf"))]
@@ -243,6 +300,21 @@ mod tests {
     use assert2::check;
 
     use super::*;
+
+    #[cfg(feature = "protobuf")]
+    #[test]
+    fn protobuf_validation_links_cached_imports() {
+        let root =
+            "syntax = \"proto3\"; import \"money.proto\"; message Order { money.Money total = 1; }";
+        let references = HashMap::from([(
+            "money.proto".to_string(),
+            "syntax = \"proto3\"; package money; message Money { int64 cents = 1; }".to_string(),
+        )]);
+        check!(
+            validate_protobuf_with_references(root, &references, &[0], &[0x0a, 0x02, 0x08, 0x13])
+                .is_ok()
+        );
+    }
 
     #[cfg(feature = "avro")]
     const ORDER_AVRO: &str = r#"{"type":"record","name":"Order","fields":[

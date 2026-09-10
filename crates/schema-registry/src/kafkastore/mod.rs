@@ -21,6 +21,13 @@ use crate::{
     store::{Registered, StoreState},
 };
 
+fn backend_error(error: anyhow::Error) -> SrError {
+    match error.downcast::<writer::StoreTimeout>() {
+        Ok(_) => SrError::OperationTimedOut,
+        Err(error) => SrError::Backend(error.to_string()),
+    }
+}
+
 /// Valid `mode` strings for the global / per-subject mode endpoints.
 const VALID_MODES: &[&str] = &["READWRITE", "READONLY", "IMPORT"];
 
@@ -189,6 +196,16 @@ impl KafkaStore {
             ));
         }
 
+        let group = krabka_client_producer::ConsumerGroupMetadata {
+            group_id: self.election_group.clone(),
+            generation_id,
+            member_id: member_id.clone(),
+            group_instance_id: None,
+        };
+        self.writer.fence(&group).await.map_err(backend_error)?;
+
+        // Fencing precedes the barrier so an abandoned old-primary transaction
+        // cannot delay the newly elected primary's synchronization record.
         // The barrier is ordered after every record committed by the previous
         // primary. Waiting for the local reader to apply it makes all following
         // id/version decisions use a caught-up StoreState.
@@ -204,12 +221,7 @@ impl KafkaStore {
                 "primary election changed while synchronizing the schema store".into(),
             ));
         }
-        Ok(Some(krabka_client_producer::ConsumerGroupMetadata {
-            group_id: self.election_group.clone(),
-            generation_id,
-            member_id,
-            group_instance_id: None,
-        }))
+        Ok(Some(group))
     }
 
     async fn write_guard(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, SrError> {
@@ -308,7 +320,7 @@ impl KafkaStore {
                 .writer
                 .produce(key, value, primary.as_ref())
                 .await
-                .map_err(|e| SrError::Backend(e.to_string()))?;
+                .map_err(backend_error)?;
             self.await_applied(offset).await?;
             let span = tracing::Span::current();
             span.record("id", id.0);
@@ -354,7 +366,7 @@ impl KafkaStore {
             .writer
             .produce(key, value, primary.as_ref())
             .await
-            .map_err(|e| SrError::Backend(e.to_string()))?;
+            .map_err(backend_error)?;
         self.await_applied(offset).await?;
         let span = tracing::Span::current();
         span.record("id", reg.id.0);
@@ -400,7 +412,7 @@ impl KafkaStore {
             .writer
             .produce_tombstone(key, primary.as_ref())
             .await
-            .map_err(|e| SrError::Backend(e.to_string()))?;
+            .map_err(backend_error)?;
         self.await_applied(offset).await?;
         Ok(Some(level))
     }
@@ -424,7 +436,7 @@ impl KafkaStore {
             .writer
             .produce(key, value, primary.as_ref())
             .await
-            .map_err(|e| SrError::Backend(e.to_string()))?;
+            .map_err(backend_error)?;
         self.await_applied(offset).await?;
         Ok(())
     }
@@ -471,7 +483,7 @@ impl KafkaStore {
             .writer
             .produce(key, value, primary.as_ref())
             .await
-            .map_err(|e| SrError::Backend(e.to_string()))?;
+            .map_err(backend_error)?;
         self.await_applied(offset).await?;
         Ok(found.version)
     }
@@ -517,12 +529,12 @@ impl KafkaStore {
         self.writer
             .produce(key, value, primary.as_ref())
             .await
-            .map_err(|e| SrError::Backend(e.to_string()))?;
+            .map_err(backend_error)?;
         let offset = self
             .writer
             .produce_tombstone(record::encode_tombstone(subject, version), primary.as_ref())
             .await
-            .map_err(|e| SrError::Backend(e.to_string()))?;
+            .map_err(backend_error)?;
         self.await_applied(offset).await?;
         Ok(version)
     }
@@ -564,7 +576,7 @@ impl KafkaStore {
             .writer
             .produce(key, value, primary.as_ref())
             .await
-            .map_err(|e| SrError::Backend(e.to_string()))?;
+            .map_err(backend_error)?;
         self.await_applied(offset).await?;
         Ok(versions)
     }
@@ -608,14 +620,14 @@ impl KafkaStore {
             .writer
             .produce(key, value, primary.as_ref())
             .await
-            .map_err(|e| SrError::Backend(e.to_string()))?;
+            .map_err(backend_error)?;
         for v in &all_versions {
             let key = record::encode_tombstone(subject, *v);
             last_offset = self
                 .writer
                 .produce_tombstone(key, primary.as_ref())
                 .await
-                .map_err(|e| SrError::Backend(e.to_string()))?;
+                .map_err(backend_error)?;
         }
         for key in [
             record::config_key(Some(subject)),
@@ -625,7 +637,7 @@ impl KafkaStore {
                 .writer
                 .produce_tombstone(key, primary.as_ref())
                 .await
-                .map_err(|e| SrError::Backend(e.to_string()))?;
+                .map_err(backend_error)?;
         }
         if last_offset >= 0 {
             self.await_applied(last_offset).await?;
@@ -651,7 +663,7 @@ impl KafkaStore {
             .writer
             .produce(key, value, primary.as_ref())
             .await
-            .map_err(|e| SrError::Backend(e.to_string()))?;
+            .map_err(backend_error)?;
         self.await_applied(offset).await?;
         Ok(())
     }
@@ -674,7 +686,7 @@ impl KafkaStore {
             .writer
             .produce(key, value, primary.as_ref())
             .await
-            .map_err(|e| SrError::Backend(e.to_string()))?;
+            .map_err(backend_error)?;
         self.await_applied(offset).await?;
         Ok(())
     }
@@ -691,7 +703,7 @@ impl KafkaStore {
             .writer
             .produce_tombstone(key, primary.as_ref())
             .await
-            .map_err(|e| SrError::Backend(e.to_string()))?;
+            .map_err(backend_error)?;
         self.await_applied(offset).await?;
         Ok(())
     }
@@ -709,7 +721,7 @@ impl KafkaStore {
         )
         .await
         .map_err(|_| SrError::OperationTimedOut)?
-        .map_err(|error| SrError::Backend(error.to_string()))
+        .map_err(backend_error)
     }
 
     async fn await_barrier(&self, barrier: BarrierGuard) -> Result<(), SrError> {

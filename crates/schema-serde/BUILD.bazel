@@ -7,4 +7,7 @@ exports_files(["Cargo.toml"])
 
 crate_library(name = "schema-serde")
 
-crate_tests(lib = "schema-serde")
+crate_tests(
+    lib = "schema-serde",
+    compile_data = ["//crates/schema-registry/tests/fixtures:rest_errors"],
+)

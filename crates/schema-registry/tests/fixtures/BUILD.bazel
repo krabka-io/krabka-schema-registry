@@ -1,0 +1,8 @@
+filegroup(
+    name = "rest_errors",
+    srcs = [
+        "rest_err_invalid_schema.json",
+        "rest_err_subject_not_found.json",
+    ],
+    visibility = ["//crates/schema-serde:__pkg__"],
+)

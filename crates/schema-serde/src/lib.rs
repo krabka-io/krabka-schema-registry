@@ -27,5 +27,7 @@ pub use format::json::JsonSerde;
 #[cfg(feature = "protobuf")]
 pub use format::protobuf::ProtobufSerde;
 pub use format::validate::validate_body;
+#[cfg(feature = "protobuf")]
+pub use format::validate::validate_protobuf_with_references;
 pub use registry::{RegistryClient, model::SchemaReference};
 pub use subject::{Role, SchemaKind, SubjectStrategy, TopicNameStrategy};

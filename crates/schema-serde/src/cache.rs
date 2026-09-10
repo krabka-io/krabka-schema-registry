@@ -340,6 +340,7 @@ impl SchemaCache {
                     if latest.schema != i.schema
                         || SchemaKind::from_wire_name(latest.schema_type.as_deref()) != i.kind
                         || latest.references != i.references
+                        || latest.message_type != i.message_type
                     {
                         return Err(SchemaSerdeError::Schema(format!(
                             "latest schema for {} differs from the local {:?} schema",

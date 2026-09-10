@@ -164,6 +164,7 @@ mod tests {
     use assert2::check;
     use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
+    use std::collections::HashMap;
 
     use super::*;
     use crate::{
@@ -194,5 +195,28 @@ mod tests {
         check!(framed[0] == 0x00);
         let back: Order = serde.deserialize("orders", &framed).unwrap();
         check!(back == order);
+    }
+
+    #[test]
+    fn validates_external_reference_from_writer_cache() {
+        let cache = SchemaCache::new(RegistryClient::new("http://unused"), CacheConfig::default());
+        let serde = JsonSerde::<Order>::value(&cache, true);
+        cache.seed_writer_schema_with_references(
+            6,
+            r#"{"$ref":"https://schemas.example/order.json"}"#,
+            HashMap::from([(
+                "https://schemas.example/order.json".into(),
+                r#"{"type":"object","required":["id","total"],"properties":{"id":{"type":"string"},"total":{"type":"number"}}}"#.into(),
+            )]),
+        );
+        let frame = wire::encode(6, br#"{"id":"o-2","total":4.5}"#);
+        let decoded = serde.deserialize("orders", &frame).unwrap();
+        check!(
+            decoded
+                == Order {
+                    id: "o-2".into(),
+                    total: 4.5
+                }
+        );
     }
 }
