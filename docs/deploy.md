@@ -81,6 +81,12 @@ Three fields map to mounted Secrets and SR flags: `spec.tls`,
 for Kafka-ACL super-users. Credentials are always referenced Secrets. Never
 write them inline.
 
+Authenticated or authorized standalone nodes must share
+`SCHEMA_REGISTRY_FORWARD_SECRET`. The secondary sends it only on the internal
+forward hop; clients cannot bypass authentication by forging the forwarding
+header. Mount the value from a Secret and restrict registry-to-registry traffic
+with network policy or mTLS.
+
 ## Next steps
 
 - Build schema-aware stream processors with

@@ -286,8 +286,7 @@ fn acl_entry_from_admin(e: krabka_client_admin::AclEntry) -> krabka_metadata::Ac
 
 /// `from_fn_with_state` middleware that gates each request.
 ///
-/// Trusted intra-cluster forwards, which carry
-/// [`crate::rest::forward::FORWARD_HEADER`], skip authz. The receiving node
+/// Authenticated intra-cluster forwards skip authz because the ingress node
 /// already authorized them. Paths with no authz requirement, where
 /// [`authz_target`] returns `None`, pass through. On deny the middleware
 /// returns `403`.
@@ -296,14 +295,10 @@ pub async fn authz_layer(
     req: Request,
     next: Next,
 ) -> Response {
-    // SECURITY: a request carrying the inter-node forward header skips authz — the
-    // ingress node already authorized it. This trusts the inter-node link: a CLIENT
-    // that sets `X-Forwarded-For-Registry` directly bypasses authz on this node.
-    // Operators MUST isolate the inter-node forwarding link (network policy /
-    // inter-node mTLS) so external clients cannot reach it.
     if req
-        .headers()
-        .contains_key(crate::rest::forward::FORWARD_HEADER)
+        .extensions()
+        .get::<crate::auth::AuthenticatedForward>()
+        .is_some()
     {
         return next.run(req).await;
     }
@@ -766,7 +761,7 @@ mod tests {
             let app = authz_app(with_acls(HashSet::new(), true, acls.into_iter().collect()));
             let mut request = Request::builder().method(method).uri(path);
             if forwarded {
-                request = request.header(crate::rest::forward::FORWARD_HEADER, "ingress-node");
+                request = request.extension(crate::auth::AuthenticatedForward);
             }
             let response = app
                 .oneshot(request.body(Body::empty()).unwrap())

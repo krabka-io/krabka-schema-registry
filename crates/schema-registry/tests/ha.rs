@@ -87,6 +87,7 @@ async fn start_node(bootstrap: &str) -> Node {
         http: reqwest::Client::new(),
         node_id: c.advertised_url.clone(),
         forward_max_body: c.runtime.forward_max_body,
+        forward_secret: None,
     };
     let app: Router = rest::router_with_forwarding(
         AppState {

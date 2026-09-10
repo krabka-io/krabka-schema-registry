@@ -176,6 +176,9 @@ struct Args {
     /// Reject unauthenticated (anonymous) requests with 401.
     #[arg(long, env = "SCHEMA_REGISTRY_REQUIRE_AUTH", default_value_t = false)]
     require_auth: bool,
+    /// Shared credential for authenticated secondary-to-primary forwards.
+    #[arg(long, env = "SCHEMA_REGISTRY_FORWARD_SECRET")]
+    forward_secret: Option<String>,
     /// `WWW-Authenticate: basic realm="<realm>"` realm advertised on 401. The
     /// default matches the realm `cp-schema-registry` emits under the standard
     /// `PropertyFileLoginModule` BASIC setup, which is the JAAS entry name.
@@ -404,6 +407,7 @@ async fn main() -> anyhow::Result<()> {
         bearer,
         require_auth: cfg.security.require_auth,
         realm: cfg.security.realm.clone(),
+        forward_secret: cfg.security.forward_secret.clone(),
     };
 
     // ── Authorization (+ ACL refresh task) ──────────────────────────────────
@@ -441,6 +445,7 @@ async fn main() -> anyhow::Result<()> {
         http: reqwest::Client::new(),
         node_id: cfg.advertised_url.clone(),
         forward_max_body: cfg.runtime.forward_max_body,
+        forward_secret: cfg.security.forward_secret.clone(),
     };
     let layers = SecurityLayers {
         auth,
@@ -521,6 +526,7 @@ impl Args {
     fn security_input(&self) -> SecurityCliInput {
         SecurityCliInput {
             require_auth: self.require_auth,
+            forward_secret: self.forward_secret.clone(),
             realm: self.realm.clone(),
             basic_auth_file: self.basic_auth_file.clone(),
             basic_users: self.basic_users.clone(),

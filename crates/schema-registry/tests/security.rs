@@ -88,6 +88,7 @@ fn secure_cfg_with_scheme(
                 super_users: HashSet::new(),
                 acl_refresh: millis(300),
             }),
+            forward_secret: Some("test-forward-secret".into()),
             client: None,
         },
     }
@@ -163,6 +164,7 @@ async fn start_secure_node(bootstrap: &str) -> Node {
         bearer: None,
         require_auth: true,
         realm: "test".into(),
+        forward_secret: Some("test-forward-secret".into()),
     };
     let authz = Arc::new(SchemaRegistryAuthz::new(HashSet::new(), true));
     {
@@ -183,6 +185,7 @@ async fn start_secure_node(bootstrap: &str) -> Node {
         http: reqwest::Client::new(),
         node_id: cfg.advertised_url.clone(),
         forward_max_body: cfg.runtime.forward_max_body,
+        forward_secret: cfg.security.forward_secret.clone(),
     };
     let app: Router = rest::router_with_security(
         AppState {
@@ -359,6 +362,7 @@ async fn start_mtls_node(bootstrap: &str, tls: TlsConfig, forward_http: reqwest:
         bearer: None,
         require_auth: true,
         realm: "test".into(),
+        forward_secret: cfg.security.forward_secret.clone(),
     };
     let authz = Arc::new(SchemaRegistryAuthz::new(HashSet::new(), true));
     {
@@ -379,6 +383,7 @@ async fn start_mtls_node(bootstrap: &str, tls: TlsConfig, forward_http: reqwest:
         http: forward_http,
         node_id: cfg.advertised_url.clone(),
         forward_max_body: cfg.runtime.forward_max_body,
+        forward_secret: cfg.security.forward_secret.clone(),
     };
     let app: Router = rest::router_with_security(
         AppState {
@@ -437,6 +442,16 @@ async fn single_node_enforces_authn_and_authz() {
     // (this node uses `realm: "test"`). See tests/fixtures/auth/basic.json.
     assert2::assert!(status.as_u16() == 401);
     assert2::assert!(www == r#"basic realm="test""#);
+
+    let forged = http
+        .post(&register_url)
+        .header(rest::forward::FORWARD_HEADER, "attacker")
+        .header("content-type", SR_CONTENT_TYPE)
+        .body(SCHEMA_BODY)
+        .send()
+        .await
+        .unwrap();
+    assert2::assert!(forged.status() == 401);
 
     // ── 401: wrong password, and an unknown user. ────────────────────────────
     for (_name, user, password) in [
@@ -531,6 +546,7 @@ async fn https_round_trip_enforces_auth_over_tls() {
         bearer: None,
         require_auth: true,
         realm: "test".into(),
+        forward_secret: cfg.security.forward_secret.clone(),
     };
     // authz disabled (None) here: this test exercises auth-over-TLS, not ACLs.
     let fwd = ForwardState {
@@ -538,6 +554,7 @@ async fn https_round_trip_enforces_auth_over_tls() {
         http: reqwest::Client::new(),
         node_id: cfg.advertised_url.clone(),
         forward_max_body: cfg.runtime.forward_max_body,
+        forward_secret: cfg.security.forward_secret.clone(),
     };
     let app: Router = rest::router_with_security(
         AppState {
@@ -802,6 +819,7 @@ async fn start_jwks_node(
     let input = SecurityCliInput {
         require_auth: true,
         realm: "test".into(),
+        forward_secret: Some("test-forward-secret".into()),
         bearer: "jwks".into(),
         jwks_endpoint_uri: Some("https://test.invalid/.well-known/jwks.json".into()),
         jwks_valid_issuer: valid_issuer,
@@ -838,12 +856,14 @@ async fn start_jwks_node(
         bearer: bearer_validator,
         require_auth: true,
         realm: "test".into(),
+        forward_secret: cfg.security.forward_secret.clone(),
     };
     let fwd = ForwardState {
         primary: primary.clone(),
         http: reqwest::Client::new(),
         node_id: cfg.advertised_url.clone(),
         forward_max_body: cfg.runtime.forward_max_body,
+        forward_secret: cfg.security.forward_secret.clone(),
     };
     let app: Router = rest::router_with_security(
         AppState {
