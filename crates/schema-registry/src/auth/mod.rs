@@ -206,8 +206,22 @@ fn attempted_identity(authorization: Option<&str>) -> (&'static str, String) {
         ("basic", name)
     } else if authorization.is_some_and(|value| value.starts_with("Bearer ")) {
         ("bearer", "unknown".into())
+    } else if authorization.is_some() {
+        ("unknown", "unknown".into())
     } else {
         ("none", "ANONYMOUS".into())
+    }
+}
+
+pub(crate) fn audit_auth_method(method: AuthMethod) -> &'static str {
+    match method {
+        AuthMethod::Anonymous => "none",
+        AuthMethod::SaslPlain => "basic",
+        AuthMethod::SaslOAuthBearer => "bearer",
+        AuthMethod::MTls => "mtls",
+        AuthMethod::SaslScramSha256 | AuthMethod::SaslScramSha512 | AuthMethod::SaslGssapi => {
+            "unknown"
+        }
     }
 }
 

@@ -321,22 +321,27 @@ pub async fn authz_layer(
         .get::<Principal>()
         .cloned()
         .unwrap_or_else(crate::auth::anonymous);
-    let Some(host) = req
+    let host = req
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
-        .map(|ConnectInfo(host)| *host)
-    else {
+        .map(|ConnectInfo(host)| *host);
+    if host.is_none() {
         tracing::warn!("schema registry authorization request has no peer address");
-        return crate::error::SrError::Forbidden.into_response();
-    };
-    let allowed = az.authorize(&principal, &host, rt, &name, op);
-    let source = AuditEndpoint {
-        ip: host.ip().to_string(),
-        port: host.port(),
-    };
+    }
+    let allowed = host.is_some_and(|host| az.authorize(&principal, &host, rt, &name, op));
+    let source = host.map_or(
+        AuditEndpoint {
+            ip: "unknown".into(),
+            port: 0,
+        },
+        |host| AuditEndpoint {
+            ip: host.ip().to_string(),
+            port: host.port(),
+        },
+    );
     let audit_principal = AuditPrincipal {
         name: principal.name.clone(),
-        auth_method: format!("{:?}", principal.auth_method),
+        auth_method: crate::auth::audit_auth_method(principal.auth_method).into(),
     };
     let operation = format!("{} {} {:?}", req.method(), req.uri().path(), op);
     if allowed {
@@ -858,11 +863,13 @@ mod tests {
         let bad_basic = basic("password-must-not-leak");
         let good_basic = basic("correct-password");
         let bearer = "Bearer bearer-token-must-not-leak";
+        let unknown = "Digest unsupported-credential-must-not-leak";
         let mut emitted = Vec::new();
 
         for (authorization, expected) in [
             (bad_basic.as_str(), StatusCode::UNAUTHORIZED),
             (bearer, StatusCode::UNAUTHORIZED),
+            (unknown, StatusCode::UNAUTHORIZED),
             (good_basic.as_str(), StatusCode::FORBIDDEN),
         ] {
             let response = app
@@ -882,6 +889,21 @@ mod tests {
             emitted.push(events.try_recv().expect("one audit event"));
             assert2::assert!(events.try_recv().is_err());
         }
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/subjects/private/versions")
+                    .header(header::AUTHORIZATION, &good_basic)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert2::assert!(response.status() == StatusCode::FORBIDDEN);
+        emitted.push(events.try_recv().expect("one audit event"));
+        assert2::assert!(events.try_recv().is_err());
         authz.cache.store(Arc::new(AclCache::new(vec![AclEntry {
             resource_type: ResourceType::Topic,
             resource_name: "private".into(),
@@ -919,7 +941,7 @@ mod tests {
                 .unwrap();
         }
         let records = sink.records();
-        assert2::assert!(records.len() == 4);
+        assert2::assert!(records.len() == 6);
         let bodies = records
             .iter()
             .map(|record| serde_json::from_slice::<serde_json::Value>(&record.value).unwrap())
@@ -933,20 +955,25 @@ mod tests {
         );
         assert2::assert!(bodies[1]["auth_protocol"] == "bearer");
         assert2::assert!(bodies[1]["actor"]["user"]["name"] == "unknown");
-        assert2::assert!(bodies[2]["status_id"] == 2);
-        assert2::assert!(bodies[2]["operation"] == "POST /subjects/private/versions Write");
-        assert2::assert!(bodies[2]["resources"][0]["type"] == "Topic");
-        assert2::assert!(bodies[2]["resources"][0]["name"] == "private");
-        assert2::assert!(bodies[3]["status_id"] == 1);
-        assert2::assert!(bodies[3]["api"]["operation"] == "POST /subjects/private/versions Write");
+        assert2::assert!(bodies[2]["auth_protocol"] == "unknown");
+        assert2::assert!(bodies[3]["status_id"] == 2);
+        assert2::assert!(bodies[3]["actor"]["user"]["type"] == "basic");
+        assert2::assert!(bodies[3]["operation"] == "POST /subjects/private/versions Write");
+        assert2::assert!(bodies[3]["resources"][0]["type"] == "Topic");
+        assert2::assert!(bodies[3]["resources"][0]["name"] == "private");
+        assert2::assert!(bodies[4]["src_endpoint"]["ip"] == "unknown");
+        assert2::assert!(bodies[5]["status_id"] == 1);
+        assert2::assert!(bodies[5]["api"]["operation"] == "POST /subjects/private/versions Write");
         let bodies = serde_json::to_string(&bodies).unwrap();
         for secret in [
             "password-must-not-leak",
             "correct-password",
             "bearer-token-must-not-leak",
+            "unsupported-credential-must-not-leak",
             bad_basic.as_str(),
             good_basic.as_str(),
             bearer,
+            unknown,
         ] {
             assert2::assert!(!bodies.contains(secret));
         }
