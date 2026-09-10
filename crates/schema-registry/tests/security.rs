@@ -461,6 +461,23 @@ async fn single_node_enforces_authn_and_authz() {
     let st = register_as_alice(&http, port, "other").await;
     assert2::assert!(st == 403);
 
+    // These registered routes must not bypass authz merely because their
+    // handlers would otherwise return an empty/not-found response.
+    for (method, path) in [
+        (reqwest::Method::DELETE, "/config/other"),
+        (reqwest::Method::GET, "/schemas/ids/1/schema"),
+        (reqwest::Method::GET, "/schemas/ids/1/subjects"),
+    ] {
+        let status = http
+            .request(method, format!("http://127.0.0.1:{port}{path}"))
+            .basic_auth("alice", Some("pw"))
+            .send()
+            .await
+            .unwrap()
+            .status();
+        assert2::assert!(status == 403);
+    }
+
     // ── 200 read: alice has Read on `s`. ─────────────────────────────────────
     await_get_body_as_alice(&http, &register_url, "[1]", 15).await;
 

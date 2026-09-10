@@ -100,9 +100,10 @@ pub fn authz_target(method: &Method, path: &str) -> Option<(ResourceType, String
             Method::GET => cluster(AclOperation::Describe),
             _ => None,
         },
-        // Per-subject compatibility level.
+        // Per-subject compatibility level. Deleting an override is also an
+        // alteration of the subject's configuration.
         ["config", subject] => match *method {
-            Method::PUT => topic(subject, AclOperation::Alter),
+            Method::PUT | Method::DELETE => topic(subject, AclOperation::Alter),
             Method::GET => topic(subject, AclOperation::Describe),
             _ => None,
         },
@@ -126,8 +127,10 @@ pub fn authz_target(method: &Method, path: &str) -> Option<(ResourceType, String
         // POST /schemas/import — bulk-register a FileDescriptorSet spanning
         // multiple subjects, so authorize it as a cluster-level schema write.
         ["schemas", "import"] if method == Method::POST => cluster(AclOperation::Write),
-        // GET /schemas/ids/{id} and GET /schemas — read schemas by id / list all.
-        ["schemas", "ids", _] | ["schemas"] | ["schemas", "ids", _, "versions"]
+        // Schema-id lookups and the global schema list expose cluster metadata.
+        ["schemas", "ids", _]
+        | ["schemas"]
+        | ["schemas", "ids", _, "versions" | "schema" | "subjects"]
             if method == Method::GET =>
         {
             cluster(AclOperation::Read)
@@ -347,9 +350,10 @@ mod tests {
             ("DELETE", "/subjects/s/versions"),
             ("PUT", "/subjects/s/versions/1"),
             ("DELETE", "/config"),
-            ("DELETE", "/config/s"),
             ("DELETE", "/mode"),
             ("POST", "/mode/s"),
+            ("GET", "/schemas/import"),
+            ("PUT", "/schemas/import"),
         ] {
             assert2::assert!(t(m, p) == None);
         }
@@ -448,6 +452,12 @@ mod tests {
             Some((Topic, "s", Describe)),
         ),
         (
+            "delete-subject-config",
+            "DELETE",
+            "/config/s",
+            Some((Topic, "s", Alter)),
+        ),
+        (
             "delete-subject-mode",
             "DELETE",
             "/mode/s",
@@ -490,6 +500,18 @@ mod tests {
             Some((Cluster, "kafka-cluster", Read)),
         ),
         (
+            "schema-by-id-raw",
+            "GET",
+            "/schemas/ids/1/schema",
+            Some((Cluster, "kafka-cluster", Read)),
+        ),
+        (
+            "schema-by-id-subjects",
+            "GET",
+            "/schemas/ids/1/subjects",
+            Some((Cluster, "kafka-cluster", Read)),
+        ),
+        (
             "list-schemas",
             "GET",
             "/schemas",
@@ -501,8 +523,6 @@ mod tests {
             "/schemas/import",
             Some((Cluster, "kafka-cluster", Write)),
         ),
-        ("get-import-unmapped", "GET", "/schemas/import", None),
-        ("put-import-unmapped", "PUT", "/schemas/import", None),
         (
             "schema-types",
             "GET",
@@ -549,12 +569,13 @@ mod tests {
     ];
 
     #[test]
-    fn route_mappings_are_named_and_table_driven() {
+    fn every_registered_route_has_an_authz_target_or_explicit_exemption() {
         for (_name, method, path, expected) in ROUTE_MAPPING_CASES {
             let expected = expected.map(|(resource_type, resource_name, operation)| {
                 (resource_type, resource_name.to_string(), operation)
             });
             assert2::assert!(t(method, path) == expected);
+            assert2::assert!(expected.is_some() || (*method == "GET" && *path == "/"));
         }
     }
 
