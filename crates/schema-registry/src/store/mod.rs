@@ -106,6 +106,10 @@ impl StoreState {
         }
     }
 
+    pub(crate) fn preserve_id_high_water(&mut self, previous: &Self) {
+        self.max_id = self.max_id.max(previous.max_id);
+    }
+
     /// Decide id/version for a registration AND apply it locally.
     ///
     /// This method validates the schema. NONE compat still rejects unparseable

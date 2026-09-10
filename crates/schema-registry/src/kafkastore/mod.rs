@@ -34,12 +34,62 @@ const VALID_MODES: &[&str] = &["READWRITE", "READONLY", "IMPORT"];
 /// it. That wait gives read-your-writes.
 pub struct KafkaStore {
     pub store: Arc<RwLock<StoreState>>,
-    applied_rx: watch::Receiver<i64>,
-    writer: writer::SchemaWriter,
+    barriers: Arc<reader::BarrierTracker>,
+    barrier_rx: watch::Receiver<u64>,
+    writer: Arc<writer::SchemaWriter>,
     write_gate: Mutex<()>,
     schemas_topic: String,
     election_group: String,
     primary: RwLock<Option<watch::Receiver<crate::election::PrimaryState>>>,
+}
+
+struct BarrierGuard {
+    token: uuid::Uuid,
+    barriers: Arc<reader::BarrierTracker>,
+    writer: Arc<writer::SchemaWriter>,
+    active: bool,
+}
+
+impl BarrierGuard {
+    async fn order(
+        barriers: Arc<reader::BarrierTracker>,
+        writer: Arc<writer::SchemaWriter>,
+    ) -> anyhow::Result<Self> {
+        let guard = Self {
+            token: barriers.reserve(),
+            barriers,
+            writer,
+            active: true,
+        };
+        guard.writer.barrier(guard.token).await?;
+        Ok(guard)
+    }
+
+    async fn finish(mut self, warning: &'static str) {
+        self.barriers.cancel(self.token);
+        match self.writer.clear_barrier(self.token).await {
+            Ok(()) => self.active = false,
+            Err(error) => tracing::warn!(%error, "{warning}"),
+        }
+    }
+}
+
+impl Drop for BarrierGuard {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        self.barriers.cancel(self.token);
+        let token = self.token;
+        let writer = self.writer.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                if let Err(error) = writer.clear_barrier(token).await {
+                    tracing::warn!(%error, "schema-store abandoned barrier cleanup failed");
+                }
+            });
+        }
+    }
 }
 
 pub struct RegisterSchema<'a> {
@@ -83,12 +133,22 @@ impl KafkaStore {
             security.clone(),
             cancel.clone(),
         );
-        let writer = writer::SchemaWriter::start(cfg, security).await?;
-        let initial_barrier = writer.barrier().await?;
-        await_applied_rx(r.applied_rx.clone(), initial_barrier, &cancel).await?;
+        let writer = Arc::new(writer::SchemaWriter::start(cfg, security).await?);
+        let initial_barrier = BarrierGuard::order(r.barriers.clone(), writer.clone()).await?;
+        await_barrier_rx(
+            r.barrier_rx.clone(),
+            r.barriers.clone(),
+            initial_barrier.token,
+            &cancel,
+        )
+        .await?;
+        initial_barrier
+            .finish("schema-store startup barrier cleanup failed")
+            .await;
         Ok(Arc::new(Self {
             store: r.store,
-            applied_rx: r.applied_rx,
+            barriers: r.barriers,
+            barrier_rx: r.barrier_rx,
             writer,
             write_gate: Mutex::new(()),
             schemas_topic: cfg.schemas_topic.clone(),
@@ -106,7 +166,10 @@ impl KafkaStore {
     async fn prepare_write(
         &self,
     ) -> Result<Option<krabka_client_producer::ConsumerGroupMetadata>, SrError> {
-        let Some(primary) = self.primary.read().clone() else {
+        let primary = self.primary.read().clone();
+        let Some(primary) = primary else {
+            let barrier = self.order_barrier().await?;
+            self.await_barrier(barrier).await?;
             return Ok(None);
         };
         let before = primary.borrow().clone();
@@ -126,12 +189,8 @@ impl KafkaStore {
         // The barrier is ordered after every record committed by the previous
         // primary. Waiting for the local reader to apply it makes all following
         // id/version decisions use a caught-up StoreState.
-        let barrier = self
-            .writer
-            .barrier()
-            .await
-            .map_err(|error| SrError::Backend(error.to_string()))?;
-        self.await_applied(barrier).await?;
+        let barrier = self.order_barrier().await?;
+        self.await_barrier(barrier).await?;
 
         let after = primary.borrow().clone();
         if !after.is_primary
@@ -628,16 +687,38 @@ impl KafkaStore {
         Ok(())
     }
 
-    /// Block until the reader has applied the record at `offset`.
-    async fn await_applied(&self, offset: i64) -> Result<(), SrError> {
-        let mut rx = self.applied_rx.clone();
-        while *rx.borrow() < offset {
-            if rx.changed().await.is_err() {
-                return Err(SrError::Backend(
-                    "schema-store reader stopped before applying the write".into(),
-                ));
+    /// Order a unique marker after the write and wait until the reader sees it.
+    async fn await_applied(&self, _offset: i64) -> Result<(), SrError> {
+        let barrier = self.order_barrier().await?;
+        self.await_barrier(barrier).await
+    }
+
+    async fn order_barrier(&self) -> Result<BarrierGuard, SrError> {
+        BarrierGuard::order(self.barriers.clone(), self.writer.clone())
+            .await
+            .map_err(|error| SrError::Backend(error.to_string()))
+    }
+
+    async fn await_barrier(&self, barrier: BarrierGuard) -> Result<(), SrError> {
+        let mut rx = self.barrier_rx.clone();
+        loop {
+            match self.barriers.poll(barrier.token) {
+                reader::BarrierPoll::Seen => break,
+                reader::BarrierPoll::Invalidated => {
+                    return Err(SrError::Backend(
+                        "schema topic was replaced before applying the write".into(),
+                    ));
+                }
+                reader::BarrierPoll::Pending => {
+                    if rx.changed().await.is_err() {
+                        return Err(SrError::Backend(
+                            "schema-store reader stopped before applying the write".into(),
+                        ));
+                    }
+                }
             }
         }
+        barrier.finish("schema-store barrier cleanup failed").await;
         Ok(())
     }
 
@@ -648,19 +729,83 @@ impl KafkaStore {
     }
 }
 
-async fn await_applied_rx(
-    mut rx: watch::Receiver<i64>,
-    offset: i64,
+async fn await_barrier_rx(
+    mut rx: watch::Receiver<u64>,
+    barriers: Arc<reader::BarrierTracker>,
+    barrier: uuid::Uuid,
     cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
-    while *rx.borrow() < offset {
-        tokio::select! {
-            biased;
-            () = cancel.cancelled() => anyhow::bail!("schema-store startup cancelled during replay"),
-            changed = rx.changed() => {
-                changed.map_err(|_| anyhow::anyhow!("schema-store reader stopped during initial replay"))?;
+    loop {
+        match barriers.poll(barrier) {
+            reader::BarrierPoll::Seen => return Ok(()),
+            reader::BarrierPoll::Invalidated => {
+                anyhow::bail!("schema topic was replaced during initial replay");
+            }
+            reader::BarrierPoll::Pending => {
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => {
+                        barriers.cancel(barrier);
+                        anyhow::bail!("schema-store startup cancelled during replay");
+                    }
+                    changed = rx.changed() => {
+                        if changed.is_err() {
+                            barriers.cancel(barrier);
+                            anyhow::bail!("schema-store reader stopped during initial replay");
+                        }
+                    }
+                }
             }
         }
     }
-    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn barrier_wait_rejects_an_unrelated_marker() {
+        let barriers = Arc::new(reader::BarrierTracker::default());
+        let wanted = barriers.reserve();
+        let other = barriers.reserve();
+        barriers.observe(other);
+        let (tx, rx) = watch::channel(1);
+        let cancel = CancellationToken::new();
+        let barriers_bg = barriers.clone();
+        let task =
+            tokio::spawn(async move { await_barrier_rx(rx, barriers_bg, wanted, &cancel).await });
+
+        tokio::task::yield_now().await;
+        assert2::check!(!task.is_finished());
+        barriers.observe(wanted);
+        tx.send(2).unwrap();
+        task.await.unwrap().unwrap();
+        assert2::check!(matches!(barriers.poll(other), reader::BarrierPoll::Seen));
+    }
+
+    #[tokio::test]
+    async fn topic_replacement_rejects_waiting_barriers() {
+        let barriers = Arc::new(reader::BarrierTracker::default());
+        let wanted = barriers.reserve();
+        barriers.observe(wanted);
+        barriers.invalidate_all();
+        let (_tx, rx) = watch::channel(1);
+        let cancel = CancellationToken::new();
+
+        let error = await_barrier_rx(rx, barriers, wanted, &cancel)
+            .await
+            .unwrap_err();
+        assert2::check!(error.to_string().contains("replaced"));
+    }
+
+    #[test]
+    fn cancelled_barriers_ignore_late_observations() {
+        let barriers = reader::BarrierTracker::default();
+        let token = barriers.reserve();
+        barriers.cancel(token);
+        barriers.observe(token);
+
+        assert2::check!(matches!(barriers.poll(token), reader::BarrierPoll::Pending));
+    }
 }
