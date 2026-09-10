@@ -63,11 +63,7 @@ pub async fn ensure_schemas_topic(
     let outcomes = admin.create_topics(&[spec], timeout).await?;
     if let Some(o) = outcomes.into_iter().next() {
         match o.error {
-            None => {
-                if let Some(id) = o.topic_id {
-                    return Ok(to_wire_uuid(id));
-                }
-            }
+            None => {}
             Some(e) if e.code == TOPIC_ALREADY_EXISTS => {}
             Some(e) => anyhow::bail!("create _schemas failed: {} ({})", e.name, e.code),
         }
@@ -78,6 +74,38 @@ pub async fn ensure_schemas_topic(
         .into_iter()
         .find(|t| t.name == cfg.schemas_topic)
         .ok_or_else(|| anyhow::anyhow!("_schemas not found after create"))?;
+    if let Some(error) = entry.error {
+        anyhow::bail!(
+            "{} metadata failed: {} ({})",
+            cfg.schemas_topic,
+            error.name,
+            error.code
+        );
+    }
+    if entry.partition_count != 1 {
+        anyhow::bail!(
+            "{} must have exactly 1 partition; observed {}",
+            cfg.schemas_topic,
+            entry.partition_count
+        );
+    }
+    let configs = admin
+        .describe_configs(&[cfg.schemas_topic.as_str()])
+        .await?;
+    let cleanup_policy = configs
+        .into_iter()
+        .find(|c| c.topic == cfg.schemas_topic)
+        .and_then(|c| c.overrides.get("cleanup.policy").cloned());
+    if !cleanup_policy
+        .as_deref()
+        .is_some_and(|policy| policy.split(',').any(|value| value.trim() == "compact"))
+    {
+        anyhow::bail!(
+            "{} cleanup.policy must include compact; observed {}",
+            cfg.schemas_topic,
+            cleanup_policy.as_deref().unwrap_or("<unset>")
+        );
+    }
     Ok(entry.topic_id.map_or(WireUuid::ZERO, to_wire_uuid))
 }
 
