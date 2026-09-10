@@ -154,7 +154,7 @@ struct Args {
     #[arg(
         long = "kafkastore-timeout",
         env = "SCHEMA_REGISTRY_KAFKASTORE_TIMEOUT_MS",
-        value_parser = parse::positive_time
+        value_parser = positive_millis_time
     )]
     store_timeout: Option<Time>,
     /// `_schemas` topic-creation timeout, with a unit (`15s`).
@@ -545,6 +545,14 @@ async fn main() -> anyhow::Result<()> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct AdminListenAddr(Option<SocketAddr>);
 
+fn positive_millis_time(value: &str) -> Result<Time, krabka_units::parse::ParseError> {
+    if value.chars().all(|character| character.is_ascii_digit()) {
+        parse::positive_time(&format!("{value}ms"))
+    } else {
+        parse::positive_time(value)
+    }
+}
+
 impl FromStr for AdminListenAddr {
     type Err = String;
 
@@ -933,7 +941,7 @@ mod tests {
         assert!(from_cli.client_frame_max == kibibytes(64));
     }
 
-    const CLEAN_RUNTIME_ENV: [(&str, Option<&str>); 15] = [
+    const CLEAN_RUNTIME_ENV: [(&str, Option<&str>); 16] = [
         ("KRABKA_ADMIN_LISTEN_ADDR", None),
         ("SCHEMA_REGISTRY_SCHEMAS_TOPIC_RF", None),
         ("SCHEMA_REGISTRY_BEARER_JWKS_REFRESH", None),
@@ -945,6 +953,7 @@ mod tests {
         ("SCHEMA_REGISTRY_STORE_READER_RETRY_BACKOFF", None),
         ("SCHEMA_REGISTRY_STORE_READER_FETCH_MAX_WAIT", None),
         ("SCHEMA_REGISTRY_STORE_READER_FETCH_MAX", None),
+        ("SCHEMA_REGISTRY_KAFKASTORE_TIMEOUT_MS", None),
         ("SCHEMA_REGISTRY_SCHEMAS_TOPIC_CREATE_TIMEOUT", None),
         ("KRABKA_SCHEMA_REGISTRY_FORWARD_MAX_BODY", None),
         ("SCHEMA_REGISTRY_DEFAULT_COMPATIBILITY_LEVEL", None),
@@ -1172,6 +1181,28 @@ mod tests {
                     assert!(from_cli.store_reader_fetch_max_wait == millis(602));
                     assert!(from_cli.store_reader_fetch_max == bytes(1_048_579));
                     assert!(from_cli.schemas_topic_create_timeout == millis(16_002));
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn confluent_kafkastore_timeout_environment_is_bare_milliseconds() {
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("environment lock");
+        temp_env::with_vars(CLEAN_RUNTIME_ENV, || {
+            temp_env::with_var(
+                "SCHEMA_REGISTRY_KAFKASTORE_TIMEOUT_MS",
+                Some("60002"),
+                || {
+                    let args = Args::try_parse_from([
+                        "krabka-schema-registry",
+                        "--bootstrap-servers=localhost:9092",
+                    ])
+                    .expect("parse Confluent millisecond environment value");
+                    assert_eq!(args.runtime_config().unwrap().store_timeout, millis(60_002));
                 },
             );
         });

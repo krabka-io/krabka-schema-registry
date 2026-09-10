@@ -205,7 +205,7 @@ mod tests {
         cache.seed_writer_schema_with_references(
             6,
             r#"{"$ref":"https://schemas.example/order.json"}"#,
-            HashMap::from([(
+            &HashMap::from([(
                 "https://schemas.example/order.json".into(),
                 r#"{"type":"object","required":["id","total"],"properties":{"id":{"type":"string"},"total":{"type":"number"}}}"#.into(),
             )]),

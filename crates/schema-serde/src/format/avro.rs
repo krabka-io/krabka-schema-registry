@@ -212,7 +212,7 @@ mod tests {
         cache.seed_writer_schema_with_references(
             12,
             invoice,
-            HashMap::from([("money.avsc".into(), money.into())]),
+            &HashMap::from([("money.avsc".into(), money.into())]),
         );
         // One nested record containing long 19: records add no bytes and Avro
         // zig-zag encodes 19 as 38.

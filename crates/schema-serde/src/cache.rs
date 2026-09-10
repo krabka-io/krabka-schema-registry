@@ -343,9 +343,9 @@ impl SchemaCache {
                 }
                 RegisterMode::UseLatest => {
                     let latest = self.client.latest(&i.subject).await?;
-                    if latest.schema != i.schema
+                    if !schemas_equivalent(i.kind, &latest.schema, &i.schema)
                         || SchemaKind::from_wire_name(latest.schema_type.as_deref()) != i.kind
-                        || latest.references != i.references
+                        || !references_equivalent(&latest.references, &i.references)
                         || latest.message_type.as_ref().is_some_and(|message_type| {
                             i.message_type.as_ref() != Some(message_type)
                         })
@@ -485,7 +485,7 @@ impl SchemaCache {
     /// # Panics
     /// Panics if a schema previously validated by the registry is missing a definition or dependency required during resolution.
     pub fn seed_writer_schema(&self, id: u32, schema: impl Into<String>) {
-        self.seed_writer_schema_with_references(id, schema, HashMap::new());
+        self.seed_writer_schema_with_references(id, schema, &HashMap::new());
     }
 
     /// Test/seed hook: install an id→root schema mapping and named sources.
@@ -497,7 +497,7 @@ impl SchemaCache {
         &self,
         id: u32,
         schema: impl Into<String>,
-        references: HashMap<String, String>,
+        references: &HashMap<String, String>,
     ) {
         let mut reference_order: Vec<_> = references.keys().cloned().collect();
         reference_order.sort();
@@ -511,6 +511,10 @@ impl SchemaCache {
     }
 
     /// Test/seed hook: install dependency-first named reference sources.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the cache mutex is poisoned.
     pub fn seed_writer_schema_with_ordered_references(
         &self,
         id: u32,
@@ -526,8 +530,8 @@ impl SchemaCache {
             id,
             WriterSchema {
                 schema,
-                reference_order,
                 references,
+                reference_order,
             },
         );
         g.unavailable_schemas.remove(&id);
@@ -583,6 +587,50 @@ impl SchemaCache {
             root.message_type,
         ))
     }
+}
+
+fn schemas_equivalent(kind: SchemaKind, left: &str, right: &str) -> bool {
+    match kind {
+        SchemaKind::Json => serde_json::from_str::<serde_json::Value>(left)
+            .and_then(|left| {
+                serde_json::from_str::<serde_json::Value>(right).map(|right| left == right)
+            })
+            .unwrap_or(false),
+        #[cfg(feature = "avro")]
+        SchemaKind::Avro => apache_avro::Schema::parse_str(left)
+            .and_then(|left| {
+                apache_avro::Schema::parse_str(right)
+                    .map(|right| left.canonical_form() == right.canonical_form())
+            })
+            .unwrap_or(false),
+        #[cfg(not(feature = "avro"))]
+        SchemaKind::Avro => left == right,
+        #[cfg(feature = "protobuf")]
+        SchemaKind::Protobuf => protox_parse::parse("left.proto", left)
+            .and_then(|left| {
+                protox_parse::parse("right.proto", right).map(|right| {
+                    crate::format::protobuf::normalize(&left)
+                        == crate::format::protobuf::normalize(&right)
+                })
+            })
+            .unwrap_or(false),
+        #[cfg(not(feature = "protobuf"))]
+        SchemaKind::Protobuf => left == right,
+    }
+}
+
+fn references_equivalent(left: &[SchemaReference], right: &[SchemaReference]) -> bool {
+    let mut left = left
+        .iter()
+        .map(|reference| (&reference.name, &reference.subject, reference.version))
+        .collect::<Vec<_>>();
+    let mut right = right
+        .iter()
+        .map(|reference| (&reference.name, &reference.subject, reference.version))
+        .collect::<Vec<_>>();
+    left.sort_unstable();
+    right.sort_unstable();
+    left == right
 }
 
 #[cfg(test)]
@@ -864,6 +912,61 @@ mod tests {
 
         check!(c.id_for_subject("orders-value") == Some(53));
         check!(c.writer_message_type(53).is_none());
+    }
+
+    #[tokio::test]
+    async fn use_latest_accepts_semantically_equivalent_schema_text() {
+        for (kind, local, remote) in [
+            (
+                SchemaKind::Avro,
+                r#"{"type":"record","name":"Order","fields":[]}"#,
+                r#"{ "fields": [], "name": "Order", "type": "record" }"#,
+            ),
+            (
+                SchemaKind::Json,
+                r#"{"type":"object","properties":{"id":{"type":"integer"}}}"#,
+                r#"{ "properties": { "id": { "type": "integer" } }, "type": "object" }"#,
+            ),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/subjects/orders-value/versions/latest"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": 54,
+                    "version": 1,
+                    "schema": remote,
+                    "schemaType": kind.wire_name()
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let cache = SchemaCache::new(
+                RegistryClient::new(server.uri()),
+                CacheConfig {
+                    mode: RegisterMode::UseLatest,
+                    ..CacheConfig::default()
+                },
+            );
+            cache.intern("orders-value", kind, local, &[], None);
+
+            cache.prewarm().await.unwrap();
+            check!(cache.id_for_subject("orders-value") == Some(54));
+        }
+    }
+
+    #[test]
+    fn reference_equality_does_not_depend_on_array_order() {
+        let a = SchemaReference {
+            name: "a.proto".into(),
+            subject: "a-value".into(),
+            version: 1,
+        };
+        let b = SchemaReference {
+            name: "b.proto".into(),
+            subject: "b-value".into(),
+            version: 2,
+        };
+        check!(references_equivalent(&[a.clone(), b.clone()], &[b, a]));
     }
 
     #[tokio::test]

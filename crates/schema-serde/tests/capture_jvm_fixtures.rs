@@ -39,7 +39,7 @@ fn run(command: &mut Command) -> String {
 
 async fn wait_ready(base: &str) {
     let client = reqwest::Client::new();
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_mins(2);
     while Instant::now() < deadline {
         if client
             .get(format!("{base}/subjects"))
