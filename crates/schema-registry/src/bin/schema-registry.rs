@@ -668,6 +668,10 @@ mod tests {
 
     #[test]
     fn gssapi_cli_parses_and_builds_broker_credentials() {
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("environment lock");
         let args = Args::try_parse_from([
             "krabka-schema-registry",
             "--bootstrap-servers=localhost:9092",
@@ -703,6 +707,10 @@ mod tests {
 
     #[test]
     fn client_resource_policy_parses_defaults_and_overrides() {
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("environment lock");
         let defaults = Args::try_parse_from([
             "krabka-schema-registry",
             "--bootstrap-servers=localhost:9092",
@@ -745,6 +753,10 @@ mod tests {
     #[test]
     fn client_resource_policy_reads_environment_and_prefers_cli() {
         const CHILD: &str = "SCHEMA_REGISTRY_CLIENT_RESOURCE_POLICY_CHILD";
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("environment lock");
 
         if std::env::var_os(CHILD).is_none() {
             let status =
