@@ -316,6 +316,7 @@ async fn sleep_or_cancel(cancel: &CancellationToken, duration: Time) -> bool {
 fn begin_rebuild(
     store: &RwLock<StoreState>,
     defaults: &StoreState,
+    previous: Option<&Rebuild>,
     next: &mut i64,
     start_offset: i64,
     end_offset: i64,
@@ -324,6 +325,9 @@ fn begin_rebuild(
     let mut snapshot = defaults.clone();
     if preserve_id_high_water {
         snapshot.preserve_id_high_water(&store.read());
+        if let Some(previous) = previous {
+            snapshot.preserve_id_high_water(&previous.store.read());
+        }
     }
     *next = start_offset;
     if start_offset >= end_offset {
@@ -465,7 +469,7 @@ pub fn spawn(
                         match log_bounds(&conn, &topic).await {
                             Ok((start, end)) => {
                                 rebuild = begin_rebuild(
-                                    &store_bg, &defaults, &mut next, start, end, false,
+                                    &store_bg, &defaults, None, &mut next, start, end, false,
                                 );
                             }
                             Err(error) => {
@@ -545,9 +549,7 @@ pub fn spawn(
                                 if let Some(cursor) = progress.next_offset {
                                     next = next.max(cursor);
                                     complete_rebuild(&store_bg, &mut rebuild, next);
-                                    // Publish cursor progress after all visible
-                                    // records have been applied. This also
-                                    // advances over aborted/control batches.
+                                    // Publish only after applying visible records, including empty control batches.
                                     if rebuild.is_none() {
                                         for token in observed_barriers.drain(..) {
                                             barriers_bg.observe(token);
@@ -579,6 +581,7 @@ pub fn spawn(
                                             rebuild = begin_rebuild(
                                                 &store_bg,
                                                 &defaults,
+                                                rebuild.as_ref(),
                                                 &mut next,
                                                 start,
                                                 end,
@@ -772,7 +775,7 @@ mod tests {
         );
         let mut next = 42;
 
-        let mut rebuild = begin_rebuild(&store, &defaults, &mut next, 7, 9, false);
+        let mut rebuild = begin_rebuild(&store, &defaults, None, &mut next, 7, 9, false);
 
         assert2::check!(store.read().versions("stale", true).is_some());
         assert2::check!(
@@ -793,7 +796,7 @@ mod tests {
     }
 
     #[test]
-    fn same_topic_rebuild_preserves_id_high_water() {
+    fn repeated_same_topic_rebuild_preserves_id_high_water() {
         let defaults = StoreState::default();
         let store = RwLock::new(defaults.clone());
         apply_record(
@@ -814,7 +817,7 @@ mod tests {
         );
         let mut next = 42;
 
-        let rebuild = begin_rebuild(&store, &defaults, &mut next, 7, 9, true).unwrap();
+        let rebuild = begin_rebuild(&store, &defaults, None, &mut next, 7, 9, true).unwrap();
         let registered = rebuild
             .store
             .write()
@@ -822,6 +825,32 @@ mod tests {
             .unwrap();
 
         assert2::check!(registered.id == SchemaId(8));
+
+        apply_record(
+            &rebuild.store,
+            SchemaRecord::Schema(
+                SchemaKey::new("compacted", SchemaVersion(1)),
+                SchemaValue {
+                    subject: "compacted".into(),
+                    version: SchemaVersion(1),
+                    id: SchemaId(11),
+                    schema_type: None,
+                    message_type: None,
+                    references: vec![],
+                    schema: r#"{"type":"long"}"#.into(),
+                    deleted: false,
+                },
+            ),
+        );
+        let replacement =
+            begin_rebuild(&store, &defaults, Some(&rebuild), &mut next, 12, 14, true).unwrap();
+        let registered = replacement
+            .store
+            .write()
+            .register("latest", SchemaType::Avro, r#"{"type":"int"}"#, &[], None)
+            .unwrap();
+
+        assert2::check!(registered.id == SchemaId(12));
     }
 
     #[test]
