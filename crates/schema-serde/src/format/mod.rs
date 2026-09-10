@@ -26,6 +26,8 @@ use {
 };
 
 use crate::error::SchemaSerdeError;
+#[cfg(any(feature = "avro", feature = "json", feature = "protobuf"))]
+use crate::registry::model::SchemaReference;
 
 /// Serialize `T` to a Confluent-framed payload for `topic`.
 ///
@@ -76,6 +78,7 @@ pub(crate) struct Binding {
     pub role: Role,
     pub kind: SchemaKind,
     pub schema: String,
+    pub references: Vec<SchemaReference>,
     pub message_type: Option<String>,
 }
 
@@ -101,6 +104,7 @@ impl Binding {
             &subject,
             self.kind,
             &self.schema,
+            &self.references,
             self.message_type.as_deref(),
         );
     }

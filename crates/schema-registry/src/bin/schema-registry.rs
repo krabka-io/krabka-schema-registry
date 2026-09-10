@@ -150,6 +150,13 @@ struct Args {
         value_parser = parse::positive_byte_size
     )]
     store_reader_fetch_max: Option<ByteSize>,
+    /// Maximum duration of one schema-store operation (`60s`).
+    #[arg(
+        long = "kafkastore-timeout",
+        env = "SCHEMA_REGISTRY_KAFKASTORE_TIMEOUT_MS",
+        value_parser = parse::positive_time
+    )]
+    store_timeout: Option<Time>,
     /// `_schemas` topic-creation timeout, with a unit (`15s`).
     #[arg(
         long,
@@ -584,6 +591,7 @@ impl Args {
             store_reader_fetch_max: self
                 .store_reader_fetch_max
                 .unwrap_or(defaults.store_reader_fetch_max),
+            store_timeout: self.store_timeout.unwrap_or(defaults.store_timeout),
             schemas_topic_create_timeout: self
                 .schemas_topic_create_timeout
                 .unwrap_or(defaults.schemas_topic_create_timeout),
@@ -1027,6 +1035,7 @@ mod tests {
             "--store-reader-retry-backoff=251ms",
             "--store-reader-fetch-max-wait=501ms",
             "--store-reader-fetch-max=1048577B",
+            "--kafkastore-timeout=60001ms",
             "--schemas-topic-create-timeout=15001ms",
             "--forward-max-body=16777217B",
             "--default-compatibility-level=FULL",
@@ -1046,6 +1055,7 @@ mod tests {
                     store_reader_retry_backoff: millis(251),
                     store_reader_fetch_max_wait: millis(501),
                     store_reader_fetch_max: bytes(1_048_577),
+                    store_timeout: millis(60_001),
                     schemas_topic_create_timeout: millis(15_001),
                     forward_max_body: bytes(16_777_217),
                     default_compatibility_level: "FULL".into(),

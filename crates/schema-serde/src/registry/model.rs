@@ -18,7 +18,7 @@ pub struct SchemaPayload<'a> {
 
 /// A reference to another registered schema.
 ///
-/// The register and lookup payloads send an empty reference list.
+/// Register and lookup payloads send this list verbatim.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SchemaReference {
     pub name: String,

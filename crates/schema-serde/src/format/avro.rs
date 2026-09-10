@@ -15,6 +15,7 @@ use crate::{
     cache::SchemaCache,
     error::SchemaSerdeError,
     format::{Binding, SchemaDeserializer, SchemaSerializer, SchemaSubject},
+    registry::model::SchemaReference,
     subject::{Role, SchemaKind},
     wire,
 };
@@ -51,6 +52,7 @@ impl<T: AvroSchema> AvroSerde<T> {
                 role,
                 kind: SchemaKind::Avro,
                 schema: reader_schema.canonical_form(),
+                references: Vec::new(),
                 message_type: None,
             },
             reader_schema,
@@ -66,6 +68,13 @@ impl<T: AvroSchema> AvroSerde<T> {
     /// An Avro serde for record **keys**: `<topic>-key`.
     pub fn key(cache: &Arc<SchemaCache>) -> Self {
         Self::make(cache, Role::Key)
+    }
+
+    /// Attach the references sent with register and lookup requests.
+    #[must_use]
+    pub fn with_references(mut self, references: Vec<SchemaReference>) -> Self {
+        self.binding.references = references;
+        self
     }
 }
 
@@ -105,11 +114,16 @@ where
 {
     fn deserialize(&self, _topic: &str, bytes: &[u8]) -> Result<T, SchemaSerdeError> {
         let (id, body) = wire::decode(bytes)?;
-        let writer_text = self.binding.cache.writer_schema(id)?;
-        let writer_schema =
-            Schema::parse_str(&writer_text).map_err(|e| SchemaSerdeError::Schema(e.to_string()))?;
+        let writer = self.binding.cache.writer_schema_with_references(id)?;
+        let mut sources: Vec<&str> = writer.references.values().map(String::as_str).collect();
+        sources.push(&writer.schema);
+        let schemas =
+            Schema::parse_list(&sources).map_err(|e| SchemaSerdeError::Schema(e.to_string()))?;
+        let writer_schema = schemas
+            .last()
+            .ok_or_else(|| SchemaSerdeError::Schema("empty Avro schema set".into()))?;
         let mut cursor = body;
-        let value = from_avro_datum(&writer_schema, &mut cursor, Some(&self.reader_schema))
+        let value = from_avro_datum(writer_schema, &mut cursor, Some(&self.reader_schema))
             .map_err(|e| SchemaSerdeError::Deserialize(e.to_string()))?;
         from_value::<T>(&value).map_err(|e| SchemaSerdeError::Deserialize(e.to_string()))
     }

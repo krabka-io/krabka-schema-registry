@@ -67,6 +67,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 # First-party crates inherited by more than one member.
 krabka-units = "0.4.0"
+krabka-schema-serde = { path = "crates/schema-serde" }
 
 # Sibling repositories, pinned by revision. These crates are declared against
 # crates.io above and in the member manifests; the patch below is the single

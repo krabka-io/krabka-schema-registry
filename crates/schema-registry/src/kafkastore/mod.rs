@@ -7,6 +7,7 @@ pub mod writer;
 
 use std::sync::Arc;
 
+use krabka_units::convert::TimeExt as _;
 use parking_lot::RwLock;
 use tokio::sync::{Mutex, watch};
 use tokio_util::sync::CancellationToken;
@@ -41,6 +42,7 @@ pub struct KafkaStore {
     schemas_topic: String,
     election_group: String,
     primary: RwLock<Option<watch::Receiver<crate::election::PrimaryState>>>,
+    store_timeout: std::time::Duration,
 }
 
 struct BarrierGuard {
@@ -154,6 +156,7 @@ impl KafkaStore {
             schemas_topic: cfg.schemas_topic.clone(),
             election_group: cfg.group_id.clone(),
             primary: RwLock::new(None),
+            store_timeout: cfg.runtime.store_timeout.to_std(),
         }))
     }
 
@@ -209,6 +212,12 @@ impl KafkaStore {
         }))
     }
 
+    async fn write_guard(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, SrError> {
+        tokio::time::timeout(self.store_timeout, self.write_gate.lock())
+            .await
+            .map_err(|_| SrError::OperationTimedOut)
+    }
+
     /// The effective mode for `subject` (subject override else global else
     /// `READWRITE`).
     fn effective_mode(&self, subject: &str) -> String {
@@ -249,7 +258,7 @@ impl KafkaStore {
     /// # Errors
     /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub async fn register(&self, req: RegisterSchema<'_>) -> Result<Registered, SrError> {
-        let _gate = self.write_gate.lock().await;
+        let _gate = self.write_guard().await?;
         let primary = self.prepare_write().await?;
         let RegisterSchema {
             subject,
@@ -376,7 +385,7 @@ impl KafkaStore {
     /// # Errors
     /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub async fn delete_subject_compat(&self, subject: &str) -> Result<Option<String>, SrError> {
-        let _gate = self.write_gate.lock().await;
+        let _gate = self.write_guard().await?;
         let primary = self.prepare_write().await?;
         let current = self
             .store
@@ -398,7 +407,7 @@ impl KafkaStore {
 
     #[tracing::instrument(level = "info", name = "kafkastore.set_compat", skip_all, fields(subject = subject.unwrap_or("global"), level = %level, mode = tracing::field::Empty), err)]
     async fn set_compat(&self, subject: Option<&str>, level: String) -> Result<(), SrError> {
-        let _gate = self.write_gate.lock().await;
+        let _gate = self.write_guard().await?;
         let primary = self.prepare_write().await?;
         let mode = match subject {
             Some(s) => self.store.read().effective_mode(s).to_string(),
@@ -429,7 +438,7 @@ impl KafkaStore {
         subject: &str,
         version: SchemaVersion,
     ) -> Result<SchemaVersion, SrError> {
-        let _gate = self.write_gate.lock().await;
+        let _gate = self.write_guard().await?;
         let primary = self.prepare_write().await?;
         self.ensure_writable(subject)?;
         let found = {
@@ -476,7 +485,7 @@ impl KafkaStore {
         subject: &str,
         version: SchemaVersion,
     ) -> Result<SchemaVersion, SrError> {
-        let _gate = self.write_gate.lock().await;
+        let _gate = self.write_guard().await?;
         let primary = self.prepare_write().await?;
         self.ensure_writable(subject)?;
         {
@@ -523,7 +532,7 @@ impl KafkaStore {
     /// # Errors
     /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub async fn soft_delete_subject(&self, subject: &str) -> Result<Vec<SchemaVersion>, SrError> {
-        let _gate = self.write_gate.lock().await;
+        let _gate = self.write_guard().await?;
         let primary = self.prepare_write().await?;
         self.ensure_writable(subject)?;
         let versions = {
@@ -569,7 +578,7 @@ impl KafkaStore {
         &self,
         subject: &str,
     ) -> Result<Vec<SchemaVersion>, SrError> {
-        let _gate = self.write_gate.lock().await;
+        let _gate = self.write_guard().await?;
         let primary = self.prepare_write().await?;
         self.ensure_writable(subject)?;
         let all_versions = {
@@ -632,7 +641,7 @@ impl KafkaStore {
         if !VALID_MODES.contains(&mode.as_str()) {
             return Err(SrError::InvalidMode(mode));
         }
-        let _gate = self.write_gate.lock().await;
+        let _gate = self.write_guard().await?;
         let primary = self.prepare_write().await?;
         if mode == "IMPORT" && !self.store.read().subjects(true).is_empty() {
             return Err(SrError::OperationNotPermitted("registry not empty".into()));
@@ -655,7 +664,7 @@ impl KafkaStore {
         if !VALID_MODES.contains(&mode.as_str()) {
             return Err(SrError::InvalidMode(mode));
         }
-        let _gate = self.write_gate.lock().await;
+        let _gate = self.write_guard().await?;
         let primary = self.prepare_write().await?;
         if mode == "IMPORT" && self.store.read().versions(subject, true).is_some() {
             return Err(SrError::OperationNotPermitted(subject.to_string()));
@@ -675,7 +684,7 @@ impl KafkaStore {
     /// # Errors
     /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub async fn clear_subject_mode(&self, subject: &str) -> Result<(), SrError> {
-        let _gate = self.write_gate.lock().await;
+        let _gate = self.write_guard().await?;
         let primary = self.prepare_write().await?;
         let key = record::mode_key(Some(subject));
         let offset = self
@@ -694,30 +703,40 @@ impl KafkaStore {
     }
 
     async fn order_barrier(&self) -> Result<BarrierGuard, SrError> {
-        BarrierGuard::order(self.barriers.clone(), self.writer.clone())
-            .await
-            .map_err(|error| SrError::Backend(error.to_string()))
+        tokio::time::timeout(
+            self.store_timeout,
+            BarrierGuard::order(self.barriers.clone(), self.writer.clone()),
+        )
+        .await
+        .map_err(|_| SrError::OperationTimedOut)?
+        .map_err(|error| SrError::Backend(error.to_string()))
     }
 
     async fn await_barrier(&self, barrier: BarrierGuard) -> Result<(), SrError> {
         let mut rx = self.barrier_rx.clone();
-        loop {
-            match self.barriers.poll(barrier.token) {
-                reader::BarrierPoll::Seen => break,
-                reader::BarrierPoll::Invalidated => {
-                    return Err(SrError::Backend(
-                        "schema topic was replaced before applying the write".into(),
-                    ));
-                }
-                reader::BarrierPoll::Pending => {
-                    if rx.changed().await.is_err() {
+        let wait = async {
+            loop {
+                match self.barriers.poll(barrier.token) {
+                    reader::BarrierPoll::Seen => break,
+                    reader::BarrierPoll::Invalidated => {
                         return Err(SrError::Backend(
-                            "schema-store reader stopped before applying the write".into(),
+                            "schema topic was replaced before applying the write".into(),
                         ));
+                    }
+                    reader::BarrierPoll::Pending => {
+                        if rx.changed().await.is_err() {
+                            return Err(SrError::Backend(
+                                "schema-store reader stopped before applying the write".into(),
+                            ));
+                        }
                     }
                 }
             }
-        }
+            Ok::<(), SrError>(())
+        };
+        tokio::time::timeout(self.store_timeout, wait)
+            .await
+            .map_err(|_| SrError::OperationTimedOut)??;
         barrier.finish("schema-store barrier cleanup failed").await;
         Ok(())
     }

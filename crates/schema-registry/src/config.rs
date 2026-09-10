@@ -83,6 +83,9 @@ pub struct RegistryRuntimeConfig {
     pub store_reader_retry_backoff: Time,
     pub store_reader_fetch_max_wait: Time,
     pub store_reader_fetch_max: ByteSize,
+    /// Maximum duration of one schema-store operation. Confluent setting:
+    /// `kafkastore.timeout.ms` (60 seconds by default).
+    pub store_timeout: Time,
     pub schemas_topic_create_timeout: Time,
     /// Largest forwarded request body this node will buffer before replaying it
     /// to the primary.
@@ -140,6 +143,7 @@ impl Default for RegistryRuntimeConfig {
             store_reader_retry_backoff: millis(250),
             store_reader_fetch_max_wait: millis(500),
             store_reader_fetch_max: mebibytes(1),
+            store_timeout: secs(60),
             schemas_topic_create_timeout: secs(15),
             forward_max_body: mebibytes(16),
             default_compatibility_level: "BACKWARD".into(),
@@ -240,6 +244,7 @@ mod tests {
                     store_reader_retry_backoff: millis(250),
                     store_reader_fetch_max_wait: millis(500),
                     store_reader_fetch_max: mebibytes(1),
+                    store_timeout: secs(60),
                     schemas_topic_create_timeout: secs(15),
                     forward_max_body: mebibytes(16),
                     default_compatibility_level: "BACKWARD".into(),

@@ -7,9 +7,13 @@ pub enum SchemaSerdeError {
     #[error("registry transport failed: {0}")]
     RegistryTransport(String),
 
-    /// Registry returned a non-success status with a body.
-    #[error("registry error {status}: {body}")]
-    RegistryStatus { status: u16, body: String },
+    /// Registry returned a Confluent error response.
+    #[error("registry error {status} ({error_code}): {message}")]
+    RegistryStatus {
+        status: u16,
+        error_code: i32,
+        message: String,
+    },
 
     /// Registry returned a successful response whose body was not valid JSON
     /// for the requested endpoint.
@@ -43,6 +47,39 @@ pub enum SchemaSerdeError {
 }
 
 impl SchemaSerdeError {
+    #[must_use]
+    pub fn is_subject_not_found(&self) -> bool {
+        matches!(
+            self,
+            Self::RegistryStatus {
+                error_code: 40401,
+                ..
+            }
+        )
+    }
+
+    #[must_use]
+    pub fn is_schema_not_found(&self) -> bool {
+        matches!(
+            self,
+            Self::RegistryStatus {
+                error_code: 40403,
+                ..
+            }
+        )
+    }
+
+    #[must_use]
+    pub fn is_incompatible(&self) -> bool {
+        matches!(
+            self,
+            Self::RegistryStatus {
+                error_code: 409,
+                ..
+            }
+        )
+    }
+
     pub(crate) fn is_transient_registry_failure(&self) -> bool {
         matches!(
             self,

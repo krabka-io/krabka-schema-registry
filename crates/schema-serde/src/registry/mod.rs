@@ -9,6 +9,7 @@ use model::{
     SubjectVersionResponse,
 };
 use reqwest::Client;
+use serde::Deserialize;
 
 use crate::{error::SchemaSerdeError, subject::SchemaKind};
 
@@ -91,6 +92,7 @@ impl RegistryClient {
         subject: &str,
         kind: SchemaKind,
         schema: &str,
+        references: &[SchemaReference],
         message_type: Option<&str>,
     ) -> Result<u32, SchemaSerdeError> {
         let url = format!("{}/subjects/{subject}/versions", self.base_url);
@@ -98,7 +100,7 @@ impl RegistryClient {
             schema,
             schema_type: kind.wire_name(),
             message_type,
-            references: &[] as &[SchemaReference],
+            references,
         };
         let resp: RegisterResponse = self.post_json(&url, &body).await?;
         Ok(resp.id)
@@ -115,6 +117,7 @@ impl RegistryClient {
         subject: &str,
         kind: SchemaKind,
         schema: &str,
+        references: &[SchemaReference],
         message_type: Option<&str>,
     ) -> Result<u32, SchemaSerdeError> {
         let url = format!("{}/subjects/{subject}", self.base_url);
@@ -122,7 +125,7 @@ impl RegistryClient {
             schema,
             schema_type: kind.wire_name(),
             message_type,
-            references: &[] as &[SchemaReference],
+            references,
         };
         let resp: SubjectVersionResponse = self.post_json(&url, &body).await?;
         Ok(resp.id)
@@ -288,9 +291,19 @@ impl RegistryClient {
             .await
             .map_err(|e| SchemaSerdeError::RegistryTransport(e.to_string()))?;
         if !status.is_success() {
+            #[derive(Deserialize)]
+            struct ErrorBody {
+                error_code: i32,
+                message: String,
+            }
+
+            let parsed = serde_json::from_str::<ErrorBody>(&text).ok();
             return Err(SchemaSerdeError::RegistryStatus {
                 status: status.as_u16(),
-                body: text,
+                error_code: parsed
+                    .as_ref()
+                    .map_or_else(|| i32::from(status.as_u16()), |body| body.error_code),
+                message: parsed.map_or(text, |body| body.message),
             });
         }
         serde_json::from_str(&text).map_err(|e| SchemaSerdeError::RegistryDecode(e.to_string()))
@@ -365,6 +378,7 @@ mod tests {
                 "orders-value",
                 SchemaKind::Protobuf,
                 "syntax = \"proto3\";",
+                &[],
                 Some("demo.Order"),
             )
             .await
@@ -398,6 +412,7 @@ mod tests {
                 "orders-value",
                 SchemaKind::Json,
                 r#"{"type":"object"}"#,
+                &[],
                 None,
             )
             .await
@@ -472,8 +487,85 @@ mod tests {
         let error = client.subject_versions_for_id(99).await.unwrap_err();
 
         check!(
-            matches!(error, SchemaSerdeError::RegistryStatus { status: 404, .. }),
+            matches!(
+                error,
+                SchemaSerdeError::RegistryStatus {
+                    status: 404,
+                    error_code: 40403,
+                    ..
+                }
+            ),
             "{error}"
         );
+    }
+
+    #[tokio::test]
+    async fn confluent_errors_are_typed_and_non_json_errors_remain_usable() {
+        let cases = [
+            (
+                404,
+                include_str!(
+                    "../../../schema-registry/tests/fixtures/rest_err_subject_not_found.json"
+                ),
+                40401,
+                true,
+                false,
+            ),
+            (
+                422,
+                include_str!(
+                    "../../../schema-registry/tests/fixtures/rest_err_invalid_schema.json"
+                ),
+                42201,
+                false,
+                false,
+            ),
+            (500, "forward failed", 500, false, true),
+        ];
+
+        for (status, fixture, error_code, subject_not_found, transient) in cases {
+            let body = serde_json::from_str::<serde_json::Value>(fixture)
+                .ok()
+                .and_then(|fixture| fixture.get("_body")?.as_str().map(str::to_owned))
+                .unwrap_or_else(|| fixture.to_owned());
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/schemas/ids/9/versions"))
+                .respond_with(ResponseTemplate::new(status).set_body_string(body))
+                .mount(&server)
+                .await;
+            let error = RegistryClient::new(server.uri())
+                .subject_versions_for_id(9)
+                .await
+                .unwrap_err();
+            assert2::assert!(let SchemaSerdeError::RegistryStatus {
+                status: actual_status,
+                error_code: actual_code,
+                message,
+            } = &error);
+            check!(*actual_status == status);
+            check!(*actual_code == error_code);
+            check!(!message.is_empty());
+            check!(error.is_subject_not_found() == subject_not_found);
+            check!(error.is_transient_registry_failure() == transient);
+        }
+    }
+
+    #[test]
+    fn registry_error_predicates_use_confluent_codes() {
+        for (code, subject, schema, incompatible) in [
+            (40401, true, false, false),
+            (40403, false, true, false),
+            (409, false, false, true),
+        ] {
+            let error = SchemaSerdeError::RegistryStatus {
+                status: 400,
+                error_code: code,
+                message: "fixture".into(),
+            };
+            check!(error.is_subject_not_found() == subject);
+            check!(error.is_schema_not_found() == schema);
+            check!(error.is_incompatible() == incompatible);
+        }
     }
 }
