@@ -73,6 +73,8 @@ pub struct SecurityCliInput {
     /// ACL-cache refresh interval. `None` uses
     /// [`DEFAULT_ACL_REFRESH`](crate::config::DEFAULT_ACL_REFRESH).
     pub acl_refresh: Option<Time>,
+    /// Shared credential authenticating secondary-to-primary HTTP forwards.
+    pub forward_secret: Option<String>,
     /// Kafka client protocol: `PLAINTEXT` | `SSL` | `SASL_PLAINTEXT` | `SASL_SSL`.
     pub kafka_security_protocol: String,
     /// SASL mechanism: `PLAIN` | `SCRAM-SHA-256` | `SCRAM-SHA-512` | `GSSAPI`.
@@ -145,6 +147,17 @@ impl std::ops::Deref for SecurityOutput {
 /// without `tls_key` (or vice versa), or a `SASL_*` protocol missing the
 /// credentials required by its selected mechanism.
 pub fn build_security(input: &SecurityCliInput) -> anyhow::Result<SecurityOutput> {
+    if (input.require_auth || input.authz)
+        && input.forward_secret.as_deref().is_none_or(str::is_empty)
+    {
+        anyhow::bail!(
+            "--forward-secret is required when authentication or authorization is enabled"
+        );
+    }
+    if let Some(secret) = &input.forward_secret {
+        reqwest::header::HeaderValue::from_str(secret)
+            .map_err(|_| anyhow::anyhow!("--forward-secret is not a valid HTTP header value"))?;
+    }
     let (bearer, jwks_handle) = build_bearer(input)?;
     Ok(SecurityOutput {
         config: SecurityConfig {
@@ -154,6 +167,7 @@ pub fn build_security(input: &SecurityCliInput) -> anyhow::Result<SecurityOutput
             bearer,
             tls: build_tls(input)?,
             authz: build_authz(input),
+            forward_secret: input.forward_secret.clone(),
             client: build_client_security(input)?,
         },
         jwks_handle,
@@ -413,9 +427,42 @@ mod tests {
                 s.bearer.is_none(),
                 s.tls.is_none(),
                 s.authz.is_none(),
+                s.forward_secret.is_none(),
                 s.client.is_none(),
-            ) == (false, true, true, true, true, true, true)
+            ) == (false, true, true, true, true, true, true, true)
         );
+    }
+
+    #[test]
+    fn secured_nodes_require_a_forward_secret() {
+        for secured in [
+            SecurityCliInput {
+                require_auth: true,
+                ..input()
+            },
+            SecurityCliInput {
+                authz: true,
+                ..input()
+            },
+        ] {
+            let error = build_security(&secured).unwrap_err().to_string();
+            assert2::assert!(error.contains("--forward-secret is required"));
+        }
+
+        let output = build_security(&SecurityCliInput {
+            require_auth: true,
+            forward_secret: Some("shared-secret".into()),
+            ..input()
+        })
+        .unwrap();
+        assert2::assert!(output.config.forward_secret.as_deref() == Some("shared-secret"));
+
+        let invalid = SecurityCliInput {
+            require_auth: true,
+            forward_secret: Some("line\nbreak".into()),
+            ..input()
+        };
+        assert2::assert!(build_security(&invalid).is_err());
     }
 
     #[test]
@@ -423,6 +470,7 @@ mod tests {
         let s = sec(&SecurityCliInput {
             require_auth: true,
             realm: "MyRealm".to_string(),
+            forward_secret: Some("shared-secret".into()),
             ..input()
         });
         assert2::assert!(s.require_auth);
@@ -597,6 +645,7 @@ mod tests {
     fn authz_enabled_builds_config() {
         let s = sec(&SecurityCliInput {
             authz: true,
+            forward_secret: Some("shared-secret".into()),
             super_users: vec!["admin".to_string(), "root".to_string()],
             acl_refresh: Some(secs(45)),
             ..input()
@@ -617,6 +666,7 @@ mod tests {
     fn authz_default_refresh() {
         let s = sec(&SecurityCliInput {
             authz: true,
+            forward_secret: Some("shared-secret".into()),
             ..input()
         });
         let a = s.authz.expect("authz enabled");

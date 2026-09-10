@@ -57,13 +57,10 @@ impl BasicAuthStore {
 
 /// Length-independent constant-time byte compare that needs no extra
 /// dependency.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    let mut diff = a.len() ^ b.len();
+    for (index, expected) in a.iter().enumerate() {
+        diff |= usize::from(expected ^ b.get(index).copied().unwrap_or_default());
     }
     diff == 0
 }

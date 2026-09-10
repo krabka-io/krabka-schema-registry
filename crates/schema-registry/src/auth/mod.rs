@@ -36,7 +36,13 @@ pub struct AuthState {
     pub require_auth: bool,
     /// Realm advertised in the `WWW-Authenticate: basic realm="…"` header.
     pub realm: String,
+    /// Shared credential accepted on secondary-to-primary forwards.
+    pub forward_secret: Option<String>,
 }
+
+/// Internal proof that the forward headers carried the configured credential.
+#[derive(Clone, Copy)]
+pub(crate) struct AuthenticatedForward;
 
 /// The outcome of [`resolve`]. It is an authenticated principal, or a `401`.
 #[derive(Debug, PartialEq, Eq)]
@@ -122,21 +128,22 @@ pub async fn auth_layer(
     mut req: Request,
     next: Next,
 ) -> Response {
-    // SECURITY: a request carrying the inter-node forward header is TRUSTED — its
-    // ingress node already authenticated AND authorized it. Mirror authz_layer's
-    // FORWARD_HEADER skip so auth and authz agree on the same trust boundary
-    // (operators MUST isolate the inter-node forwarding link; a client that forges
-    // `X-Forwarded-For-Registry` bypasses both).
-    // This is required for ALL auth methods: an mTLS client's credential (its TLS
-    // client cert) cannot be carried over the secondary→primary proxy hop, so the
-    // primary must trust the forward rather than re-authenticate.
+    let authenticated_forward = req
+        .headers()
+        .get(crate::rest::forward::FORWARD_SECRET_HEADER)
+        .zip(st.forward_secret.as_deref())
+        .is_some_and(|(actual, expected)| {
+            basic::constant_time_eq(expected.as_bytes(), actual.as_bytes())
+        });
     if req
         .headers()
         .contains_key(crate::rest::forward::FORWARD_HEADER)
+        && authenticated_forward
     {
         if req.extensions().get::<Principal>().is_none() {
             req.extensions_mut().insert(anonymous());
         }
+        req.extensions_mut().insert(AuthenticatedForward);
         return next.run(req).await;
     }
     let mtls = req.extensions().get::<MtlsPrincipal>().map(|m| m.0.clone());
@@ -221,6 +228,7 @@ mod tests {
             bearer: None,
             require_auth,
             realm: "schema-registry".to_string(),
+            forward_secret: None,
         }
     }
 
@@ -287,6 +295,7 @@ mod tests {
             bearer: Some(Arc::new(validator)),
             require_auth: true,
             realm: "schema-registry".to_string(),
+            forward_secret: None,
         };
         // Minimal unsigned JWT: header.payload.signature (empty sig for
         // `alg:none`). The validator requires an `exp` claim in the future, so
@@ -310,6 +319,7 @@ mod tests {
             bearer: None,
             require_auth: false,
             realm: "schema-registry".to_string(),
+            forward_secret: None,
         };
         for (_name, authorization) in [
             ("bearer", "Bearer some.jwt.token".to_string()),
@@ -356,15 +366,8 @@ mod tests {
         assert2::assert!(decision == AuthDecision::Authn(mtls));
     }
 
-    /// Model A: `auth_layer` TRUSTS a request that carries `FORWARD_HEADER` and
-    /// runs the handler even under `require_auth` with no credentials, because
-    /// the ingress node already authenticated it. A non-forwarded
-    /// credential-less request still returns `401`. This mechanism lets ALL
-    /// auth methods work, including mTLS, whose credential cannot cross the
-    /// secondary→primary hop. See `proxy()`, which forwards no credential, only
-    /// `FORWARD_HEADER`.
     #[tokio::test]
-    async fn forwarded_request_bypasses_require_auth() {
+    async fn only_authenticated_forward_bypasses_require_auth() {
         use axum::{Router, body::Body, routing::get};
         use tower::ServiceExt as _; // for `oneshot`
 
@@ -373,18 +376,30 @@ mod tests {
             bearer: None,
             require_auth: true,
             realm: "schema-registry".to_string(),
+            forward_secret: Some("shared-secret".into()),
         };
         let app: Router = Router::new().route("/", get(|| async { "ok" })).layer(
             axum::middleware::from_fn_with_state(Arc::new(st), auth_layer),
         );
 
-        for (_name, forwarded, expected) in [
-            ("forwarded_request", true, StatusCode::OK),
-            ("non_forwarded_request", false, StatusCode::UNAUTHORIZED),
+        for (_name, forward_secret, expected) in [
+            (
+                "authenticated_forward",
+                Some("shared-secret"),
+                StatusCode::OK,
+            ),
+            ("forged_forward", None, StatusCode::UNAUTHORIZED),
+            (
+                "wrong_forward_secret",
+                Some("wrong"),
+                StatusCode::UNAUTHORIZED,
+            ),
         ] {
-            let mut request = Request::builder().uri("/");
-            if forwarded {
-                request = request.header(crate::rest::forward::FORWARD_HEADER, "ingress-node");
+            let mut request = Request::builder()
+                .uri("/")
+                .header(crate::rest::forward::FORWARD_HEADER, "ingress-node");
+            if let Some(secret) = forward_secret {
+                request = request.header(crate::rest::forward::FORWARD_SECRET_HEADER, secret);
             }
             let response = app
                 .clone()
@@ -425,6 +440,7 @@ mod tests {
             bearer: None,
             require_auth: true,
             realm: "SchemaRegistry-Props".to_string(),
+            forward_secret: None,
         };
         let app: Router = Router::new()
             .route("/subjects", get(|| async { "[]" }))

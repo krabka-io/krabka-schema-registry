@@ -162,6 +162,8 @@ pub struct SecurityConfig {
     /// Server TLS (HTTPS). None means plain HTTP.
     pub tls: Option<krabka_security::TlsConfig>,
     pub authz: Option<AuthzConfig>,
+    /// Shared credential authenticating secondary-to-primary HTTP forwards.
+    pub forward_secret: Option<String>,
     /// SR-to-broker Kafka-client security. None means PLAINTEXT.
     pub client: Option<krabka_client_core::ClientSecurity>,
 }
@@ -265,8 +267,9 @@ mod tests {
                 s.bearer.is_none(),
                 s.tls.is_none(),
                 s.authz.is_none(),
+                s.forward_secret.is_none(),
                 s.client.is_none(),
-            ) == (false, true, true, true, true, true, true)
+            ) == (false, true, true, true, true, true, true, true)
         );
     }
 

@@ -15,6 +15,7 @@ use tokio::sync::watch;
 use crate::election::PrimaryState;
 
 pub const FORWARD_HEADER: &str = "x-forwarded-for-registry";
+pub const FORWARD_SECRET_HEADER: &str = "x-krabka-forward-secret";
 
 #[derive(Clone)]
 pub struct ForwardState {
@@ -23,6 +24,7 @@ pub struct ForwardState {
     pub node_id: String,
     /// Largest forwarded request body this node buffers before replaying it.
     pub forward_max_body: ByteSize,
+    pub forward_secret: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -94,6 +96,9 @@ async fn proxy(fwd: &ForwardState, primary_url: &str, req: Request) -> Response 
     // could not work for mTLS anyway (a client cert can't be carried on this
     // server-to-server `reqwest` call).
     rb = rb.header(FORWARD_HEADER, &fwd.node_id);
+    if let Some(secret) = &fwd.forward_secret {
+        rb = rb.header(FORWARD_SECRET_HEADER, secret);
+    }
     match rb.send().await {
         Ok(resp) => {
             let status =
@@ -200,6 +205,7 @@ mod tests {
             http: reqwest::Client::new(),
             node_id: "secondary".into(),
             forward_max_body: bytes(3),
+            forward_secret: None,
         };
         let request = Request::builder()
             .method(Method::POST)
