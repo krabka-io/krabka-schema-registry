@@ -1,15 +1,14 @@
 //! `/schemas/*` read endpoints.
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, State},
     response::Response,
 };
 
 use crate::{
     error::SrError,
-    ids::SchemaId,
     rest::{
-        AppState, DeletedQ,
+        AppState, DeletedQ, Query, parse_schema_id,
         response::{ok_json, ok_raw},
     },
 };
@@ -22,14 +21,15 @@ use crate::{
 /// Panics if a schema previously validated by the registry is missing a definition or dependency required during resolution.
 pub async fn get_by_id(
     State(st): State<AppState>,
-    Path(id): Path<i32>,
+    Path(id): Path<String>,
     Query(q): Query<DeletedQ>,
 ) -> Result<Response, SrError> {
+    let id = parse_schema_id(&id)?;
     let (ty, schema, references, message_type) = st
         .store
         .store
         .read()
-        .schema_by_id(SchemaId(id), q.deleted)
+        .schema_by_id(id, q.deleted)
         .ok_or(SrError::SchemaNotFound)?;
     let mut body = serde_json::Map::new();
     if let Some(t) = ty.wire_name() {
@@ -62,14 +62,15 @@ pub fn types(State(_st): State<AppState>) -> Response {
 /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
 pub fn get_by_id_versions(
     State(st): State<AppState>,
-    Path(id): Path<i32>,
+    Path(id): Path<String>,
     Query(q): Query<DeletedQ>,
 ) -> Result<Response, SrError> {
+    let id = parse_schema_id(&id)?;
     let pairs = st
         .store
         .store
         .read()
-        .schema_id_subject_versions(SchemaId(id), q.deleted);
+        .schema_id_subject_versions(id, q.deleted);
     if pairs.is_empty() {
         return Err(SrError::SchemaNotFound);
     }
@@ -87,13 +88,14 @@ pub fn get_by_id_versions(
 /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
 pub async fn get_by_id_schema(
     State(st): State<AppState>,
-    Path(id): Path<i32>,
+    Path(id): Path<String>,
 ) -> Result<Response, SrError> {
+    let id = parse_schema_id(&id)?;
     let (_, schema, _, _) = st
         .store
         .store
         .read()
-        .schema_by_id(SchemaId(id), false)
+        .schema_by_id(id, false)
         .ok_or(SrError::SchemaNotFound)?;
     Ok(ok_raw(schema))
 }
@@ -105,14 +107,15 @@ pub async fn get_by_id_schema(
 /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
 pub async fn get_by_id_subjects(
     State(st): State<AppState>,
-    Path(id): Path<i32>,
+    Path(id): Path<String>,
     Query(q): Query<DeletedQ>,
 ) -> Result<Response, SrError> {
+    let id = parse_schema_id(&id)?;
     let pairs = st
         .store
         .store
         .read()
-        .schema_id_subject_versions(SchemaId(id), q.deleted);
+        .schema_id_subject_versions(id, q.deleted);
     if pairs.is_empty() {
         return Err(SrError::SchemaNotFound);
     }

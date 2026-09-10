@@ -1,0 +1,39 @@
+[
+  {
+    "body": {
+      "error_code": 404,
+      "message": "HTTP 404 Not Found"
+    },
+    "method": "GET",
+    "op": "unknown_path",
+    "path": "/nope",
+    "status": 404
+  },
+  {
+    "body": {
+      "error_code": 405,
+      "message": "HTTP 405 Method Not Allowed"
+    },
+    "method": "PUT",
+    "op": "wrong_method",
+    "path": "/subjects/s",
+    "status": 405
+  },
+  {
+    "body": {
+      "error_code": 404,
+      "message": "HTTP 404 Not Found"
+    },
+    "method": "GET",
+    "op": "invalid_schema_id",
+    "path": "/schemas/ids/abc",
+    "status": 404
+  },
+  {
+    "body": [],
+    "method": "GET",
+    "op": "uppercase_deleted",
+    "path": "/subjects?deleted=TRUE",
+    "status": 200
+  }
+]

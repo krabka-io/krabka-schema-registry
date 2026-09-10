@@ -15,24 +15,55 @@ use std::sync::Arc;
 
 use axum::{
     Router,
-    extract::{Path, Query, State},
+    extract::{FromRequestParts, Path, State},
+    http::request::Parts,
     response::Response,
     routing::{get, post},
 };
+use serde::de::DeserializeOwned;
 
-use crate::{error::SrError, ids::SchemaVersion, kafkastore::KafkaStore};
+use crate::{
+    error::SrError,
+    ids::{SchemaId, SchemaVersion},
+    kafkastore::KafkaStore,
+};
 
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<KafkaStore>,
 }
 
+pub struct Query<T>(pub T);
+
+impl<S, T> FromRequestParts<S> for Query<T>
+where
+    S: Send + Sync,
+    T: DeserializeOwned,
+{
+    type Rejection = SrError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        axum::extract::Query::<T>::from_request_parts(parts, state)
+            .await
+            .map(|axum::extract::Query(value)| Self(value))
+            .map_err(|error| SrError::InvalidRequest(error.to_string()))
+    }
+}
+
 /// `?deleted=true` query toggle shared by the GET endpoints that can surface
 /// soft-deleted rows.
 #[derive(serde::Deserialize, Default)]
 pub struct DeletedQ {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_bool")]
     pub deleted: bool,
+}
+
+pub(crate) fn deserialize_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+    Ok(String::deserialize(deserializer)?.eq_ignore_ascii_case("true"))
 }
 
 fn schemas_types(state: State<AppState>) -> std::future::Ready<Response> {
@@ -45,7 +76,7 @@ fn list_schemas(state: State<AppState>, query: Query<DeletedQ>) -> std::future::
 
 fn schema_versions(
     state: State<AppState>,
-    id: Path<i32>,
+    id: Path<String>,
     query: Query<DeletedQ>,
 ) -> std::future::Ready<Result<Response, SrError>> {
     std::future::ready(schemas::get_by_id_versions(state, id, query))
@@ -91,6 +122,12 @@ fn parse_concrete_version(v: &str) -> Result<SchemaVersion, SrError> {
         Ok(n) if n >= 1 => Ok(SchemaVersion(n)),
         _ => Err(SrError::InvalidVersion(v.to_string())),
     }
+}
+
+fn parse_schema_id(id: &str) -> Result<SchemaId, SrError> {
+    id.parse::<i32>()
+        .map(SchemaId)
+        .map_err(|_| SrError::NotFound)
 }
 
 pub fn router(state: AppState) -> Router {
@@ -148,6 +185,8 @@ pub fn router(state: AppState) -> Router {
             "/compatibility/subjects/{subject}/versions/{version}",
             post(compatibility::check),
         )
+        .fallback(|| async { SrError::NotFound })
+        .method_not_allowed_fallback(|| async { SrError::MethodNotAllowed })
         .with_state(state)
 }
 

@@ -113,10 +113,14 @@ impl KafkaStore {
         let (Some(generation_id), Some(member_id)) =
             (before.generation_id, before.member_id.clone())
         else {
-            return Err(SrError::Backend("node is not the elected primary".into()));
+            return Err(SrError::UnknownLeader(
+                "node is not the elected primary".into(),
+            ));
         };
         if !before.is_primary {
-            return Err(SrError::Backend("node is not the elected primary".into()));
+            return Err(SrError::UnknownLeader(
+                "node is not the elected primary".into(),
+            ));
         }
 
         // The barrier is ordered after every record committed by the previous
@@ -134,7 +138,7 @@ impl KafkaStore {
             || after.generation_id != Some(generation_id)
             || after.member_id.as_deref() != Some(member_id.as_str())
         {
-            return Err(SrError::Backend(
+            return Err(SrError::UnknownLeader(
                 "primary election changed while synchronizing the schema store".into(),
             ));
         }

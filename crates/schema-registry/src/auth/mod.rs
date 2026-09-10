@@ -13,7 +13,7 @@ use axum::{
     extract::{Request, State},
     http::{HeaderMap, StatusCode, header},
     middleware::Next,
-    response::{IntoResponse, Response},
+    response::Response,
 };
 use base64::Engine as _;
 use basic::BasicAuthStore;
@@ -172,13 +172,7 @@ pub async fn auth_layer(
 ///   `authentication.realm`, which is the JAAS entry name, and is
 ///   `SchemaRegistry-Props` in the capture.
 fn unauthorized(st: &AuthState) -> Response {
-    let body = serde_json::json!({ "error_code": 401, "message": "Unauthorized" }).to_string();
-    let mut resp = (
-        StatusCode::UNAUTHORIZED,
-        [("content-type", crate::error::CONTENT_TYPE)],
-        body,
-    )
-        .into_response();
+    let mut resp = crate::error::error_response(StatusCode::UNAUTHORIZED, 401, "Unauthorized");
     if st.basic.is_some()
         && let Ok(v) = header::HeaderValue::from_str(&format!("basic realm=\"{}\"", st.realm))
     {

@@ -335,6 +335,19 @@ async fn run_admin_lifecycle(http: &reqwest::Client, base: &str) -> Vec<serde_js
     results
 }
 
+async fn run_protocol_errors(http: &reqwest::Client, base: &str) -> Vec<serde_json::Value> {
+    let mut results = Vec::new();
+    for (op, method, path) in [
+        ("unknown_path", "GET", "/nope"),
+        ("wrong_method", "PUT", "/subjects/s"),
+        ("invalid_schema_id", "GET", "/schemas/ids/abc"),
+        ("uppercase_deleted", "GET", "/subjects?deleted=TRUE"),
+    ] {
+        results.push(drive(http, base, op, method, path, None).await);
+    }
+    results
+}
+
 async fn run_mode_lifecycle(http: &reqwest::Client, base: &str) -> Vec<serde_json::Value> {
     let mut results = Vec::new();
     macro_rules! step {
@@ -481,6 +494,12 @@ async fn capture_admin_lifecycle() {
         .expect("build reqwest client");
 
     wait_for_registry(&http, &base, &container_id).await;
+
+    let protocol_errors = run_protocol_errors(&http, &base).await;
+    write_admin_fixture(
+        "protocol_errors.json",
+        &serde_json::to_string_pretty(&protocol_errors).unwrap(),
+    );
 
     // Drive the 26-op admin lifecycle and persist the REST verdicts.
     let results = run_admin_lifecycle(&http, &base).await;

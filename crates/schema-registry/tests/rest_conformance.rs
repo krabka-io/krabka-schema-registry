@@ -14,10 +14,14 @@ use axum::{
 };
 use krabka_broker::{Broker, BrokerConfig};
 use krabka_schema_registry::{
+    authz::{SchemaRegistryAuthz, authz_layer},
     config::{RegistryConfig, SecurityConfig},
+    election::PrimaryState,
+    error::CONTENT_TYPE,
     kafkastore::KafkaStore,
-    rest::{self, AppState},
+    rest::{self, AppState, forward::ForwardState},
 };
+use krabka_units::prelude::*;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
@@ -92,6 +96,214 @@ async fn body_json(resp: axum::response::Response) -> serde_json::Value {
             String::from_utf8_lossy(&b)
         )
     })
+}
+
+async fn error_json(resp: axum::response::Response) -> (StatusCode, serde_json::Value) {
+    let status = resp.status();
+    assert2::assert!(
+        resp.headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            == Some(CONTENT_TYPE)
+    );
+    let body = body_json(resp).await;
+    assert2::assert!(body["error_code"].is_number());
+    assert2::assert!(body["message"].is_string());
+    (status, body)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn protocol_errors_match_cp_and_boolean_queries_are_lenient() {
+    let fixture = fixture_value("admin/protocol_errors.json");
+    let (broker, store, cancel, _dir) = boot_registry().await;
+    let app = rest::router(AppState {
+        store: store.clone(),
+    });
+
+    for (index, method, uri) in [
+        (0, "GET", "/nope"),
+        (1, "PUT", "/subjects/s"),
+        (2, "GET", "/schemas/ids/abc"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let (status, body) = error_json(response).await;
+        assert2::assert!(u64::from(status.as_u16()) == fixture[index]["status"].as_u64().unwrap());
+        assert2::assert!(body == fixture[index]["body"]);
+    }
+
+    let uppercase = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/subjects?deleted=TRUE")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert2::assert!(
+        u64::from(uppercase.status().as_u16()) == fixture[3]["status"].as_u64().unwrap()
+    );
+    assert2::assert!(body_json(uppercase).await == fixture[3]["body"]);
+    for uri in [
+        "/subjects?deleted=FALSE",
+        "/subjects?deleted=",
+        "/subjects?deleted",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert2::assert!(response.status() == StatusCode::OK);
+    }
+    let duplicate = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/subjects?deleted=true&deleted=false")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (status, body) = error_json(duplicate).await;
+    assert2::assert!(status == StatusCode::BAD_REQUEST);
+    assert2::assert!(body["error_code"] == 400);
+
+    let denied = app.clone().layer(axum::middleware::from_fn_with_state(
+        std::sync::Arc::new(SchemaRegistryAuthz::new(
+            std::collections::HashSet::new(),
+            true,
+        )),
+        authz_layer,
+    ));
+    let response = denied
+        .oneshot(
+            Request::builder()
+                .uri("/subjects")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (status, body) = error_json(response).await;
+    assert2::assert!(status == StatusCode::FORBIDDEN);
+    assert2::assert!(body["error_code"] == 40301);
+
+    let schema = r#"{"schema":"{\"type\":\"string\"}"}"#;
+    assert2::assert!(post_register(&app, "deleted", schema).await.status() == StatusCode::OK);
+    let soft_delete = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/subjects/deleted")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert2::assert!(soft_delete.status() == StatusCode::OK);
+    let deleted_subjects = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/subjects?deleted=TRUE")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert2::assert!(body_json(deleted_subjects).await == serde_json::json!(["deleted"]));
+
+    let permanent_delete = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/subjects/deleted?permanent=TRUE")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert2::assert!(permanent_delete.status() == StatusCode::OK);
+
+    cancel.cancel();
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forwarding_errors_use_confluent_codes() {
+    let fixture = fixture_value("election/forwarding.json");
+    let (broker, store, cancel, _dir) = boot_registry().await;
+
+    for (name, state, expected_code) in [
+        (
+            "stopped-leader",
+            PrimaryState {
+                is_primary: false,
+                primary_url: Some("http://127.0.0.1:1".into()),
+                generation_id: None,
+                member_id: None,
+            },
+            fixture["body"]["error_code"].as_i64().unwrap(),
+        ),
+        (
+            "unknown-leader",
+            PrimaryState {
+                is_primary: false,
+                primary_url: None,
+                generation_id: None,
+                member_id: None,
+            },
+            50004,
+        ),
+    ] {
+        let (_tx, primary) = tokio::sync::watch::channel(state);
+        let app = rest::router_with_forwarding(
+            AppState {
+                store: store.clone(),
+            },
+            ForwardState {
+                primary,
+                http: reqwest::Client::new(),
+                node_id: name.into(),
+                forward_max_body: mebibytes(1),
+                forward_secret: None,
+            },
+        );
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/subjects/s/versions")
+                    .body(Body::from(r#"{"schema":"{\"type\":\"string\"}"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let (status, body) = error_json(response).await;
+        assert2::assert!(u64::from(status.as_u16()) == fixture["status"].as_u64().unwrap());
+        assert2::assert!(body["error_code"].as_i64() == Some(expected_code));
+        if name == "stopped-leader" {
+            assert2::assert!(body == fixture["body"]);
+        }
+    }
+
+    cancel.cancel();
+    broker.shutdown().await;
 }
 
 async fn post_register(app: &axum::Router, subject: &str, body: &str) -> axum::response::Response {
