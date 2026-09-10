@@ -5,6 +5,7 @@ use bytes::Bytes;
 use krabka_client_core::ClientSecurity;
 use krabka_client_producer::{Acks, ConsumerGroupMetadata, Producer, ProducerRecord};
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
 use crate::config::RegistryConfig;
 
@@ -76,17 +77,25 @@ impl SchemaWriter {
     }
 
     /// Produce a non-transactional ordering barrier. The reader waits for this
-    /// offset before a primary derives ids or versions from its local state.
+    /// marker before a primary derives ids or versions from its local state.
     ///
     /// # Errors
     ///
     /// Returns an error when the record cannot be produced or acknowledged.
-    pub async fn barrier(&self) -> anyhow::Result<i64> {
-        self.produce_unfenced(
-            br#"{"keytype":"NOOP","magic":0}"#.to_vec(),
-            Some(b"{}".to_vec()),
-        )
-        .await
+    pub async fn barrier(&self, token: Uuid) -> anyhow::Result<()> {
+        self.produce_unfenced(barrier_key(token), Some(b"{}".to_vec()))
+            .await?;
+        Ok(())
+    }
+
+    /// Tombstone a barrier after its waiter observes it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the tombstone cannot be produced or acknowledged.
+    pub async fn clear_barrier(&self, token: Uuid) -> anyhow::Result<()> {
+        self.produce_unfenced(barrier_key(token), None).await?;
+        Ok(())
     }
 
     async fn produce_unfenced(&self, key: Vec<u8>, value: Option<Vec<u8>>) -> anyhow::Result<i64> {
@@ -170,5 +179,22 @@ impl SchemaWriter {
         } else {
             self.produce_unfenced(key, None).await
         }
+    }
+}
+
+fn barrier_key(token: Uuid) -> Vec<u8> {
+    format!(r#"{{"keytype":"NOOP","magic":0,"barrier":"{token}"}}"#).into_bytes()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn barrier_keys_are_unique_and_tombstoneable() {
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        assert2::check!(barrier_key(first) != barrier_key(second));
+        assert2::check!(barrier_key(first) == barrier_key(first));
     }
 }

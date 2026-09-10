@@ -34,7 +34,8 @@ const VALID_MODES: &[&str] = &["READWRITE", "READONLY", "IMPORT"];
 /// it. That wait gives read-your-writes.
 pub struct KafkaStore {
     pub store: Arc<RwLock<StoreState>>,
-    applied_rx: watch::Receiver<i64>,
+    barriers: Arc<reader::BarrierTracker>,
+    barrier_rx: watch::Receiver<u64>,
     writer: writer::SchemaWriter,
     write_gate: Mutex<()>,
     schemas_topic: String,
@@ -84,11 +85,25 @@ impl KafkaStore {
             cancel.clone(),
         );
         let writer = writer::SchemaWriter::start(cfg, security).await?;
-        let initial_barrier = writer.barrier().await?;
-        await_applied_rx(r.applied_rx.clone(), initial_barrier, &cancel).await?;
+        let initial_barrier = r.barriers.reserve();
+        if let Err(error) = writer.barrier(initial_barrier).await {
+            r.barriers.cancel(initial_barrier);
+            return Err(error);
+        }
+        await_barrier_rx(
+            r.barrier_rx.clone(),
+            r.barriers.clone(),
+            initial_barrier,
+            &cancel,
+        )
+        .await?;
+        if let Err(error) = writer.clear_barrier(initial_barrier).await {
+            tracing::warn!(%error, "schema-store startup barrier cleanup failed");
+        }
         Ok(Arc::new(Self {
             store: r.store,
-            applied_rx: r.applied_rx,
+            barriers: r.barriers,
+            barrier_rx: r.barrier_rx,
             writer,
             write_gate: Mutex::new(()),
             schemas_topic: cfg.schemas_topic.clone(),
@@ -106,7 +121,10 @@ impl KafkaStore {
     async fn prepare_write(
         &self,
     ) -> Result<Option<krabka_client_producer::ConsumerGroupMetadata>, SrError> {
-        let Some(primary) = self.primary.read().clone() else {
+        let primary = self.primary.read().clone();
+        let Some(primary) = primary else {
+            let barrier = self.order_barrier().await?;
+            self.await_barrier(barrier).await?;
             return Ok(None);
         };
         let before = primary.borrow().clone();
@@ -126,12 +144,8 @@ impl KafkaStore {
         // The barrier is ordered after every record committed by the previous
         // primary. Waiting for the local reader to apply it makes all following
         // id/version decisions use a caught-up StoreState.
-        let barrier = self
-            .writer
-            .barrier()
-            .await
-            .map_err(|error| SrError::Backend(error.to_string()))?;
-        self.await_applied(barrier).await?;
+        let barrier = self.order_barrier().await?;
+        self.await_barrier(barrier).await?;
 
         let after = primary.borrow().clone();
         if !after.is_primary
@@ -628,15 +642,33 @@ impl KafkaStore {
         Ok(())
     }
 
-    /// Block until the reader has applied the record at `offset`.
-    async fn await_applied(&self, offset: i64) -> Result<(), SrError> {
-        let mut rx = self.applied_rx.clone();
-        while *rx.borrow() < offset {
+    /// Order a unique marker after the write and wait until the reader sees it.
+    async fn await_applied(&self, _offset: i64) -> Result<(), SrError> {
+        let barrier = self.order_barrier().await?;
+        self.await_barrier(barrier).await
+    }
+
+    async fn order_barrier(&self) -> Result<uuid::Uuid, SrError> {
+        let token = self.barriers.reserve();
+        if let Err(error) = self.writer.barrier(token).await {
+            self.barriers.cancel(token);
+            return Err(SrError::Backend(error.to_string()));
+        }
+        Ok(token)
+    }
+
+    async fn await_barrier(&self, barrier: uuid::Uuid) -> Result<(), SrError> {
+        let mut rx = self.barrier_rx.clone();
+        while !self.barriers.consume(barrier) {
             if rx.changed().await.is_err() {
+                self.barriers.cancel(barrier);
                 return Err(SrError::Backend(
                     "schema-store reader stopped before applying the write".into(),
                 ));
             }
+        }
+        if let Err(error) = self.writer.clear_barrier(barrier).await {
+            tracing::warn!(%error, "schema-store barrier cleanup failed");
         }
         Ok(())
     }
@@ -648,19 +680,51 @@ impl KafkaStore {
     }
 }
 
-async fn await_applied_rx(
-    mut rx: watch::Receiver<i64>,
-    offset: i64,
+async fn await_barrier_rx(
+    mut rx: watch::Receiver<u64>,
+    barriers: Arc<reader::BarrierTracker>,
+    barrier: uuid::Uuid,
     cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
-    while *rx.borrow() < offset {
+    while !barriers.consume(barrier) {
         tokio::select! {
             biased;
-            () = cancel.cancelled() => anyhow::bail!("schema-store startup cancelled during replay"),
+            () = cancel.cancelled() => {
+                barriers.cancel(barrier);
+                anyhow::bail!("schema-store startup cancelled during replay");
+            }
             changed = rx.changed() => {
-                changed.map_err(|_| anyhow::anyhow!("schema-store reader stopped during initial replay"))?;
+                if changed.is_err() {
+                    barriers.cancel(barrier);
+                    anyhow::bail!("schema-store reader stopped during initial replay");
+                }
             }
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn barrier_wait_rejects_an_unrelated_marker() {
+        let barriers = Arc::new(reader::BarrierTracker::default());
+        let wanted = barriers.reserve();
+        let other = barriers.reserve();
+        barriers.observe(other);
+        let (tx, rx) = watch::channel(1);
+        let cancel = CancellationToken::new();
+        let barriers_bg = barriers.clone();
+        let task =
+            tokio::spawn(async move { await_barrier_rx(rx, barriers_bg, wanted, &cancel).await });
+
+        tokio::task::yield_now().await;
+        assert2::check!(!task.is_finished());
+        barriers.observe(wanted);
+        tx.send(2).unwrap();
+        task.await.unwrap().unwrap();
+        assert2::check!(barriers.consume(other));
+    }
 }
