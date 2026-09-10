@@ -8,6 +8,10 @@ exports_files(["Cargo.toml"])
 crate_library(name = "schema-serde")
 
 crate_tests(
+    compile_data = [
+        "//crates/schema-registry:tests/fixtures/rest_err_invalid_schema.json",
+        "//crates/schema-registry:tests/fixtures/rest_err_subject_not_found.json",
+    ] + glob(["tests/fixtures/**"]),
     lib = "schema-serde",
-    compile_data = ["//crates/schema-registry/tests/fixtures:rest_errors"],
+    manual = ["capture_jvm_fixtures"],
 )

@@ -161,10 +161,11 @@ impl jsonschema::Retrieve for CachedRetriever {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use assert2::check;
     use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
-    use std::collections::HashMap;
 
     use super::*;
     use crate::{

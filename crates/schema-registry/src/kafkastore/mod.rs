@@ -737,9 +737,7 @@ impl KafkaStore {
                     }
                     reader::BarrierPoll::Pending => {
                         if rx.changed().await.is_err() {
-                            return Err(SrError::Backend(
-                                "schema-store reader stopped before applying the write".into(),
-                            ));
+                            return Err(SrError::OperationTimedOut);
                         }
                     }
                 }

@@ -45,7 +45,7 @@ krabka-audit = { version = "0.4.0" }
 krabka-metadata = { version = "0.4.0" }
 krabka-telemetry = { version = "0.4.0" }
 krabka-units = { workspace = true }
-krabka-schema-serde = { workspace = true, features = ["protobuf"] }
+krabka-schema-serde = { workspace = true, features = ["avro", "json", "protobuf"] }
 arc-swap = { workspace = true }
 base64 = { workspace = true }
 derive_more = { workspace = true }
@@ -81,7 +81,9 @@ tikv-jemallocator = { version = "0.7", optional = true, features = ["profiling",
 
 [dev-dependencies]
 krabka-broker = { version = "0.4.0" }
+prost = { workspace = true }
 ring = { workspace = true }
+schemars = { workspace = true }
 tempfile.workspace = true
 temp-env = "0.3"
 

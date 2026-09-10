@@ -358,12 +358,22 @@ mod tests {
     #[tokio::test]
     async fn register_posts_schema_payload_and_returns_id() {
         let server = MockServer::start().await;
+        let references = [SchemaReference {
+            name: "money.proto".into(),
+            subject: "money-value".into(),
+            version: 3,
+        }];
         Mock::given(method("POST"))
             .and(path("/subjects/orders-value/versions"))
             .and(body_json(serde_json::json!({
                 "schema": "syntax = \"proto3\";",
                 "schemaType": "PROTOBUF",
-                "messageType": "demo.Order"
+                "messageType": "demo.Order",
+                "references": [{
+                    "name": "money.proto",
+                    "subject": "money-value",
+                    "version": 3
+                }]
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "id": 42
@@ -378,7 +388,7 @@ mod tests {
                 "orders-value",
                 SchemaKind::Protobuf,
                 "syntax = \"proto3\";",
-                &[],
+                &references,
                 Some("demo.Order"),
             )
             .await
@@ -390,11 +400,21 @@ mod tests {
     #[tokio::test]
     async fn lookup_posts_schema_payload_and_returns_existing_id() {
         let server = MockServer::start().await;
+        let references = [SchemaReference {
+            name: "common.json".into(),
+            subject: "common-value".into(),
+            version: 2,
+        }];
         Mock::given(method("POST"))
             .and(path("/subjects/orders-value"))
             .and(body_json(serde_json::json!({
                 "schema": r#"{"type":"object"}"#,
-                "schemaType": "JSON"
+                "schemaType": "JSON",
+                "references": [{
+                    "name": "common.json",
+                    "subject": "common-value",
+                    "version": 2
+                }]
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "id": 43,
@@ -412,7 +432,7 @@ mod tests {
                 "orders-value",
                 SchemaKind::Json,
                 r#"{"type":"object"}"#,
-                &[],
+                &references,
                 None,
             )
             .await

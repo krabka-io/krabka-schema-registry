@@ -293,6 +293,7 @@ pub fn validate_json(schema: &str, body: &[u8]) -> Result<(), SchemaSerdeError> 
 mod tests {
     #[cfg(feature = "protobuf")]
     use std::collections::HashMap;
+
     // `assert!` only appears in the Avro and Protobuf cases; the JSON ones
     // check a plain `Result`.
     #[cfg(any(feature = "avro", feature = "protobuf"))]

@@ -137,10 +137,11 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use apache_avro::AvroSchema;
     use assert2::check;
     use serde::{Deserialize, Serialize};
-    use std::collections::HashMap;
 
     use super::*;
     use crate::{

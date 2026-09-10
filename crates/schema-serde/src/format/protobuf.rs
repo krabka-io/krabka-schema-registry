@@ -424,8 +424,7 @@ mod tests {
     use assert2::check;
     use prost_reflect::prost_types::{DescriptorProto, FieldDescriptorProto, FileDescriptorProto};
 
-    use super::{ProtobufSerde, normalize};
-    use super::{message_index, message_index_in};
+    use super::{ProtobufSerde, message_index, message_index_in, normalize};
     use crate::format::SchemaDeserializer;
 
     #[test]

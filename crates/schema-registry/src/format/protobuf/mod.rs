@@ -17,13 +17,12 @@
 mod compat;
 mod diff;
 
+pub use krabka_schema_serde::format::protobuf::normalize;
 use prost_reflect::{
     DescriptorPool,
     prost::Message,
     prost_types::{FileDescriptorProto, FileDescriptorSet},
 };
-
-pub use krabka_schema_serde::format::protobuf::normalize;
 
 use super::ParsedSchema;
 use crate::error::SrError;

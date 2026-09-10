@@ -1,7 +1,9 @@
 use std::{sync::Arc, time::Duration};
 
 use axum::Router;
+use bytes::Bytes;
 use krabka_broker::{Broker, BrokerConfig};
+use krabka_client_producer::{Acks, Producer, ProducerRecord};
 use krabka_schema_registry::{
     config::{RegistryConfig, SecurityConfig},
     election::{Election, PrimaryState},
@@ -65,6 +67,7 @@ struct Node {
     store: Arc<KafkaStore>,
     primary: tokio::sync::watch::Receiver<PrimaryState>,
     election_cancel: CancellationToken,
+    store_cancel: CancellationToken,
     cancel: CancellationToken,
 }
 
@@ -79,7 +82,8 @@ async fn start_node(bootstrap: &str) -> Node {
     let c = cfg(bootstrap, port);
     let cancel = CancellationToken::new();
     let election_cancel = cancel.child_token();
-    let store = KafkaStore::start(&c, cancel.clone()).await.unwrap();
+    let store_cancel = cancel.child_token();
+    let store = KafkaStore::start(&c, store_cancel.clone()).await.unwrap();
     let primary = Election::start(&c, election_cancel.clone()).await.unwrap();
     store.install_primary(primary.clone());
     let fwd = ForwardState {
@@ -107,6 +111,7 @@ async fn start_node(bootstrap: &str) -> Node {
         store,
         primary,
         election_cancel,
+        store_cancel,
         cancel,
     }
 }
@@ -175,6 +180,28 @@ async fn multi_node_elects_one_primary_forwards_writes_and_fails_over() {
 
     // FAILOVER: stop only the primary's election session. Keep its store and
     // reader alive so the test can prove its stale generation is fenced.
+    let abandoned_producer = Producer::builder()
+        .bootstrap(bootstrap.clone())
+        .client_id("abandoned-old-primary")
+        .transactional_id("krabka-schema-registry-schema-registry")
+        .enable_idempotence(true)
+        .acks(Acks::All)
+        .build()
+        .await
+        .unwrap();
+    abandoned_producer.init_transactions().await.unwrap();
+    let _abandoned_transaction = abandoned_producer.begin_transaction().await.unwrap();
+    abandoned_producer
+        .send(ProducerRecord {
+            topic: "_schemas".into(),
+            key: Some(Bytes::from_static(br#"{"keytype":"NOOP","magic":0}"#)),
+            value: Some(Bytes::from_static(b"{}")),
+            ..Default::default()
+        })
+        .await
+        .await
+        .unwrap()
+        .unwrap();
     let stale_store = if a_is_primary {
         a.election_cancel.cancel();
         a.store.clone()
@@ -184,16 +211,19 @@ async fn multi_node_elects_one_primary_forwards_writes_and_fails_over() {
     };
     let survivor = if a_is_primary { &mut b } else { &mut a };
     await_state(&mut survivor.primary, 30, |s| s.is_primary).await;
-    let r2 = http
-        .post(format!(
+    let r2 = tokio::time::timeout(
+        Duration::from_secs(5),
+        http.post(format!(
             "http://127.0.0.1:{}/subjects/s2/versions",
             survivor.port
         ))
         .header("content-type", "application/vnd.schemaregistry.v1+json")
         .body(body)
-        .send()
-        .await
-        .unwrap();
+        .send(),
+    )
+    .await
+    .expect("new primary write is not delayed by abandoned transaction")
+    .unwrap();
     assert2::assert!(r2.status() == 200);
 
     // The old primary still holds its stale local PrimaryState. Its barrier can
@@ -222,5 +252,39 @@ async fn multi_node_elects_one_primary_forwards_writes_and_fails_over() {
 
     a.cancel.cancel();
     b.cancel.cancel();
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelled_store_reader_returns_confluent_timeout() {
+    let dir = tempfile::tempdir().unwrap();
+    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+        .await
+        .unwrap();
+    let mut node = start_node(&broker.listen_addr().to_string()).await;
+    await_state(&mut node.primary, 20, |state| state.is_primary).await;
+    node.store_cancel.cancel();
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://127.0.0.1:{}/subjects/cancelled/versions",
+            node.port
+        ))
+        .header("content-type", "application/vnd.schemaregistry.v1+json")
+        .body(r#"{"schema":"\"string\""}"#)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert2::check!(status == reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+    assert2::check!(
+        body == serde_json::json!({
+            "error_code": 50002,
+            "message": "Operation timed out"
+        })
+    );
+
+    node.cancel.cancel();
     broker.shutdown().await;
 }
