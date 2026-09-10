@@ -1,0 +1,9 @@
+{
+  "body": {
+    "error_code": 50003,
+    "message": "Error while forwarding register schema request to the leader"
+  },
+  "content_type": "application/vnd.schemaregistry.v1+json",
+  "operation": "register_on_follower_with_stopped_master",
+  "status": 500
+}

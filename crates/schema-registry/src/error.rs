@@ -11,6 +11,18 @@ pub const CONTENT_TYPE: &str = "application/vnd.schemaregistry.v1+json";
 
 #[derive(Debug, thiserror::Error)]
 pub enum SrError {
+    #[error("HTTP 404 Not Found")]
+    NotFound,
+    #[error("HTTP 405 Method Not Allowed")]
+    MethodNotAllowed,
+    #[error("Forbidden")]
+    Forbidden,
+    #[error("{0}")]
+    InvalidRequest(String),
+    #[error("Forwarding failed: {0}")]
+    ForwardFailed(String),
+    #[error("Unknown leader: {0}")]
+    UnknownLeader(String),
     #[error("Subject '{0}' not found.")]
     SubjectNotFound(String),
     #[error("Version not found.")]
@@ -62,6 +74,12 @@ impl SrError {
     #[must_use]
     pub fn error_code(&self) -> i32 {
         match self {
+            Self::NotFound => 404,
+            Self::MethodNotAllowed => 405,
+            Self::Forbidden => 40301,
+            Self::InvalidRequest(_) => 400,
+            Self::ForwardFailed(_) => 50003,
+            Self::UnknownLeader(_) => 50004,
             Self::SubjectNotFound(_) => 40401,
             Self::VersionNotFound => 40402,
             Self::SchemaNotFound => 40403,
@@ -84,7 +102,11 @@ impl SrError {
     #[must_use]
     pub fn http_status(&self) -> StatusCode {
         match self {
-            Self::SubjectNotFound(_)
+            Self::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
+            Self::Forbidden => StatusCode::FORBIDDEN,
+            Self::InvalidRequest(_) => StatusCode::BAD_REQUEST,
+            Self::NotFound
+            | Self::SubjectNotFound(_)
             | Self::VersionNotFound
             | Self::SchemaNotFound
             | Self::SubjectNotSoftDeleted(_)
@@ -98,7 +120,9 @@ impl SrError {
             | Self::InvalidMode(_)
             | Self::ReferenceNotFound(_)
             | Self::ReferencedByOthers(_) => StatusCode::UNPROCESSABLE_ENTITY,
-            Self::Backend(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Backend(_) | Self::ForwardFailed(_) | Self::UnknownLeader(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
             Self::Incompatible(_) => StatusCode::CONFLICT,
         }
     }
@@ -106,15 +130,13 @@ impl SrError {
 
 impl IntoResponse for SrError {
     fn into_response(self) -> Response {
-        let body =
-            serde_json::json!({ "error_code": self.error_code(), "message": self.to_string() });
-        (
-            self.http_status(),
-            [("content-type", CONTENT_TYPE)],
-            body.to_string(),
-        )
-            .into_response()
+        error_response(self.http_status(), self.error_code(), self.to_string())
     }
+}
+
+pub fn error_response(status: StatusCode, error_code: i32, message: impl Into<String>) -> Response {
+    let body = serde_json::json!({ "error_code": error_code, "message": message.into() });
+    (status, [("content-type", CONTENT_TYPE)], body.to_string()).into_response()
 }
 
 #[cfg(test)]
@@ -134,6 +156,37 @@ mod tests {
     #[test]
     fn codes_map_to_status() {
         for (_name, error, code, status) in [
+            ("not_found", SrError::NotFound, 404, StatusCode::NOT_FOUND),
+            (
+                "method_not_allowed",
+                SrError::MethodNotAllowed,
+                405,
+                StatusCode::METHOD_NOT_ALLOWED,
+            ),
+            (
+                "forbidden",
+                SrError::Forbidden,
+                40301,
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                "invalid_request",
+                SrError::InvalidRequest("bad request".into()),
+                400,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "forward_failed",
+                SrError::ForwardFailed("unreachable".into()),
+                50003,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            (
+                "unknown_leader",
+                SrError::UnknownLeader("leader not known".into()),
+                50004,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
             (
                 "subject_not_found",
                 SrError::SubjectNotFound("s".into()),

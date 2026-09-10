@@ -20,7 +20,11 @@ use axum::{
     routing::{get, post},
 };
 
-use crate::{error::SrError, ids::SchemaVersion, kafkastore::KafkaStore};
+use crate::{
+    error::SrError,
+    ids::{SchemaId, SchemaVersion},
+    kafkastore::KafkaStore,
+};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -31,8 +35,16 @@ pub struct AppState {
 /// soft-deleted rows.
 #[derive(serde::Deserialize, Default)]
 pub struct DeletedQ {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_bool")]
     pub deleted: bool,
+}
+
+pub(crate) fn deserialize_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+    Ok(String::deserialize(deserializer)?.eq_ignore_ascii_case("true"))
 }
 
 fn schemas_types(state: State<AppState>) -> std::future::Ready<Response> {
@@ -45,7 +57,7 @@ fn list_schemas(state: State<AppState>, query: Query<DeletedQ>) -> std::future::
 
 fn schema_versions(
     state: State<AppState>,
-    id: Path<i32>,
+    id: Path<String>,
     query: Query<DeletedQ>,
 ) -> std::future::Ready<Result<Response, SrError>> {
     std::future::ready(schemas::get_by_id_versions(state, id, query))
@@ -91,6 +103,12 @@ fn parse_concrete_version(v: &str) -> Result<SchemaVersion, SrError> {
         Ok(n) if n >= 1 => Ok(SchemaVersion(n)),
         _ => Err(SrError::InvalidVersion(v.to_string())),
     }
+}
+
+fn parse_schema_id(id: &str) -> Result<SchemaId, SrError> {
+    id.parse::<i32>()
+        .map(SchemaId)
+        .map_err(|_| SrError::NotFound)
 }
 
 pub fn router(state: AppState) -> Router {
@@ -148,6 +166,8 @@ pub fn router(state: AppState) -> Router {
             "/compatibility/subjects/{subject}/versions/{version}",
             post(compatibility::check),
         )
+        .fallback(|| async { SrError::NotFound })
+        .method_not_allowed_fallback(|| async { SrError::MethodNotAllowed })
         .with_state(state)
 }
 

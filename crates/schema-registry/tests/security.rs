@@ -229,12 +229,8 @@ async fn await_state(
     }
 }
 
-/// POST a `register` for `subject` to `port` as `alice:pw`; returns the status.
-async fn register_as_alice(
-    http: &reqwest::Client,
-    port: i32,
-    subject: &str,
-) -> reqwest::StatusCode {
+/// POST a `register` for `subject` to `port` as `alice:pw`.
+async fn register_as_alice(http: &reqwest::Client, port: i32, subject: &str) -> reqwest::Response {
     http.post(format!(
         "http://127.0.0.1:{port}/subjects/{subject}/versions"
     ))
@@ -244,7 +240,6 @@ async fn register_as_alice(
     .send()
     .await
     .unwrap()
-    .status()
 }
 
 /// Poll `register` on `subject` as `alice:pw` until it returns `200`, or until
@@ -254,8 +249,8 @@ async fn register_as_alice(
 async fn await_register_200(http: &reqwest::Client, port: i32, subject: &str, secs: u64) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
     loop {
-        let st = register_as_alice(http, port, subject).await;
-        if st == 200 {
+        let response = register_as_alice(http, port, subject).await;
+        if response.status() == 200 {
             return;
         }
         assert2::assert!(tokio::time::Instant::now() < deadline);
@@ -296,11 +291,7 @@ fn https_client(ca_pem: &str, identity: Option<(&str, &str)>) -> reqwest::Client
     builder.build().unwrap()
 }
 
-async fn register_over_mtls(
-    http: &reqwest::Client,
-    port: i32,
-    subject: &str,
-) -> reqwest::StatusCode {
+async fn register_over_mtls(http: &reqwest::Client, port: i32, subject: &str) -> reqwest::Response {
     http.post(format!(
         "https://127.0.0.1:{port}/subjects/{subject}/versions"
     ))
@@ -309,14 +300,13 @@ async fn register_over_mtls(
     .send()
     .await
     .unwrap()
-    .status()
 }
 
 async fn await_register_mtls_200(http: &reqwest::Client, port: i32, subject: &str, secs: u64) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
     loop {
-        let status = register_over_mtls(http, port, subject).await;
-        if status == 200 {
+        let response = register_over_mtls(http, port, subject).await;
+        if response.status() == 200 {
             return;
         }
         assert2::assert!(tokio::time::Instant::now() < deadline);
@@ -473,8 +463,9 @@ async fn single_node_enforces_authn_and_authz() {
     await_register_200(&http, port, "s", 15).await;
 
     // ── 403: alice authenticates but has no ACL for `other`. ─────────────────
-    let st = register_as_alice(&http, port, "other").await;
-    assert2::assert!(st == 403);
+    let denied = register_as_alice(&http, port, "other").await;
+    assert2::assert!(denied.status() == 403);
+    assert2::assert!(denied.json::<serde_json::Value>().await.unwrap()["error_code"] == 40301);
 
     // These registered routes must not bypass authz merely because their
     // handlers would otherwise return an empty/not-found response.
@@ -483,14 +474,16 @@ async fn single_node_enforces_authn_and_authz() {
         (reqwest::Method::GET, "/schemas/ids/1/schema"),
         (reqwest::Method::GET, "/schemas/ids/1/subjects"),
     ] {
-        let status = http
+        let response = http
             .request(method, format!("http://127.0.0.1:{port}{path}"))
             .basic_auth("alice", Some("pw"))
             .send()
             .await
-            .unwrap()
-            .status();
-        assert2::assert!(status == 403);
+            .unwrap();
+        assert2::assert!(response.status() == 403);
+        assert2::assert!(
+            response.json::<serde_json::Value>().await.unwrap()["error_code"] == 40301
+        );
     }
 
     // ── 200 read: alice has Read on `s`. ─────────────────────────────────────
@@ -657,8 +650,9 @@ async fn mtls_two_nodes_authorize_then_forward_to_primary() {
     await_get_body_over_mtls(&mtls_alice, primary_port, "s", "[1]", 20).await;
     await_get_body_over_mtls(&mtls_alice, secondary_port, "s", "[1]", 20).await;
 
-    let status = register_over_mtls(&mtls_alice, secondary_port, "other").await;
-    assert2::assert!(status == 403);
+    let denied = register_over_mtls(&mtls_alice, secondary_port, "other").await;
+    assert2::assert!(denied.status() == 403);
+    assert2::assert!(denied.json::<serde_json::Value>().await.unwrap()["error_code"] == 40301);
 
     a.cancel.cancel();
     b.cancel.cancel();
@@ -702,8 +696,9 @@ async fn two_nodes_authorize_then_forward_to_primary() {
 
     // A write to the SECONDARY for `other` (no ACL): denied at ingress with 403,
     // never forwarded.
-    let st = register_as_alice(&http, secondary_port, "other").await;
-    assert2::assert!(st == 403);
+    let denied = register_as_alice(&http, secondary_port, "other").await;
+    assert2::assert!(denied.status() == 403);
+    assert2::assert!(denied.json::<serde_json::Value>().await.unwrap()["error_code"] == 40301);
 
     a.cancel.cancel();
     b.cancel.cancel();

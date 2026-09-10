@@ -12,7 +12,7 @@ use axum::{
 use krabka_units::prelude::*;
 use tokio::sync::watch;
 
-use crate::election::PrimaryState;
+use crate::{election::PrimaryState, error::SrError};
 
 pub const FORWARD_HEADER: &str = "x-forwarded-for-registry";
 pub const FORWARD_SECRET_HEADER: &str = "x-krabka-forward-secret";
@@ -66,11 +66,9 @@ pub async fn forward_layer(State(fwd): State<ForwardState>, req: Request, next: 
     match decide(&method, already, &state) {
         Decision::PassThrough => next.run(req).await,
         Decision::Unavailable => {
-            (StatusCode::SERVICE_UNAVAILABLE, "no primary elected").into_response()
+            SrError::UnknownLeader("no primary elected".into()).into_response()
         }
-        Decision::Retriable => {
-            (StatusCode::SERVICE_UNAVAILABLE, "not primary; retry").into_response()
-        }
+        Decision::Retriable => SrError::UnknownLeader("not primary; retry".into()).into_response(),
         Decision::Forward(primary_url) => proxy(&fwd, &primary_url, req).await,
     }
 }
@@ -81,7 +79,7 @@ async fn proxy(fwd: &ForwardState, primary_url: &str, req: Request) -> Response 
     let url = format!("{primary_url}{path_q}");
     // `to_bytes` takes a raw `usize` cap.
     let Ok(bytes) = axum::body::to_bytes(body, fwd.forward_max_body.bytes_usize()).await else {
-        return (StatusCode::BAD_REQUEST, "body read failed").into_response();
+        return SrError::InvalidRequest("body read failed".into()).into_response();
     };
     let method = reqwest::Method::from_bytes(parts.method.as_str().as_bytes())
         .unwrap_or(reqwest::Method::POST);
@@ -115,7 +113,7 @@ async fn proxy(fwd: &ForwardState, primary_url: &str, req: Request) -> Response 
             }
             out
         }
-        Err(e) => (StatusCode::BAD_GATEWAY, format!("forward failed: {e}")).into_response(),
+        Err(e) => SrError::ForwardFailed(e.to_string()).into_response(),
     }
 }
 

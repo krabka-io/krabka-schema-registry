@@ -132,13 +132,17 @@ fn docker_pull(image: &str) {
 /// group id. The doubled `SCHEMA_REGISTRY_` prefix is correct, because cp maps
 /// the `schema.registry.group.id` property with a `SCHEMA_REGISTRY_` prefix.
 /// Both nodes share it so they join the same `"sr"` group.
-fn docker_run_schema_registry(host_name: &str) -> String {
+fn docker_run_schema_registry(host_name: &str, network: &str) -> String {
     let out = Command::new("docker")
         .args([
             "run",
             "-d",
             "--rm",
             "--add-host=host.docker.internal:host-gateway",
+            "--network",
+            network,
+            "--name",
+            host_name,
             "-p",
             "0:8081",
             "-e",
@@ -151,6 +155,10 @@ fn docker_run_schema_registry(host_name: &str) -> String {
             &format!("SCHEMA_REGISTRY_SCHEMA_REGISTRY_GROUP_ID={GROUP_ID}"),
             "-e",
             "SCHEMA_REGISTRY_MASTER_ELIGIBILITY=true",
+            "-e",
+            "SCHEMA_REGISTRY_LEADER_CONNECT_TIMEOUT_MS=1000",
+            "-e",
+            "SCHEMA_REGISTRY_LEADER_READ_TIMEOUT_MS=1000",
             SR_IMAGE,
         ])
         .output()
@@ -160,6 +168,30 @@ fn docker_run_schema_registry(host_name: &str) -> String {
     assert2::assert!(!id.is_empty());
     eprintln!("CAPTURE schema-registry container ({host_name}) id={id}");
     id
+}
+
+struct NetworkGuard {
+    name: String,
+}
+
+impl NetworkGuard {
+    fn create() -> Self {
+        let name = format!("krabka-sr-capture-{}", std::process::id());
+        let status = Command::new("docker")
+            .args(["network", "create", &name])
+            .status()
+            .expect("create Docker network");
+        assert2::assert!(status.success());
+        Self { name }
+    }
+}
+
+impl Drop for NetworkGuard {
+    fn drop(&mut self) {
+        let _ = Command::new("docker")
+            .args(["network", "rm", &self.name])
+            .output();
+    }
 }
 
 fn docker_mapped_port(id: &str) -> u16 {
@@ -235,7 +267,7 @@ async fn wait_for_registry(http: &reqwest::Client, base: &str, container_id: &st
 /// Connect host-side directly to `127.0.0.1:9092`, `DescribeGroups` the `"sr"`
 /// group, and write the per-member metadata and assignment bytes and the
 /// group-level protocol shape to the two election fixtures.
-async fn capture_group() {
+async fn capture_group() -> String {
     // The broker implements api_key 15 (DescribeGroups); connect a plain Client.
     let client = Client::builder()
         .bootstrap("127.0.0.1:9092".to_string())
@@ -351,6 +383,9 @@ async fn capture_group() {
         "CAPTURE election capture done — protocol_type={:?} elected_master_member_id={:?}",
         group.protocol_type, elected_master_id
     );
+    elected_master_identity
+        .and_then(|identity| identity["host"].as_str().map(str::to_string))
+        .expect("elected master host")
 }
 
 // ── the test ──────────────────────────────────────────────────────────────────
@@ -361,11 +396,12 @@ async fn capture_election() {
     docker_pull(SR_IMAGE);
 
     let (broker, _dir) = start_host_broker().await;
+    let network = NetworkGuard::create();
 
     // Two cp nodes, distinct host names, both on the same broker + group.
-    let id1 = docker_run_schema_registry("sr-node-1");
+    let id1 = docker_run_schema_registry("sr-node-1", &network.name);
     let _g1 = ContainerGuard { id: id1.clone() };
-    let id2 = docker_run_schema_registry("sr-node-2");
+    let id2 = docker_run_schema_registry("sr-node-2", &network.name);
     let _g2 = ContainerGuard { id: id2.clone() };
 
     let port1 = docker_mapped_port(&id1);
@@ -383,7 +419,45 @@ async fn capture_election() {
     wait_for_registry(&http, &base2, &id2, "node-2").await;
 
     // Read the group + persist the member/assignment bytes (broker still up).
-    capture_group().await;
+    let master_host = capture_group().await;
+
+    let (master_id, follower_base) = if master_host == "sr-node-1" {
+        (&id1, &base2)
+    } else {
+        (&id2, &base1)
+    };
+    let status = Command::new("docker")
+        .args(["stop", master_id])
+        .status()
+        .expect("stop elected master");
+    assert2::assert!(status.success());
+
+    let response = http
+        .post(format!("{follower_base}/subjects/down/versions"))
+        .header("content-type", "application/vnd.schemaregistry.v1+json")
+        .body(r#"{"schema":"{\"type\":\"string\"}"}"#)
+        .send()
+        .await
+        .expect("request follower with stopped master");
+    let status = response.status().as_u16();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let text = response.text().await.unwrap_or_default();
+    let body =
+        serde_json::from_str::<serde_json::Value>(&text).unwrap_or(serde_json::Value::String(text));
+    write_election_fixture(
+        "forwarding.json",
+        &serde_json::to_string_pretty(&serde_json::json!({
+            "operation": "register_on_follower_with_stopped_master",
+            "status": status,
+            "content_type": content_type,
+            "body": body,
+        }))
+        .unwrap(),
+    );
 
     broker.shutdown().await;
     eprintln!("CAPTURE done — members.json + group.json written");

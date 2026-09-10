@@ -17,7 +17,7 @@ use std::{collections::HashSet, net::SocketAddr, sync::Arc};
 use arc_swap::ArcSwap;
 use axum::{
     extract::{Request, State},
-    http::{Method, StatusCode},
+    http::Method,
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -321,12 +321,14 @@ pub async fn authz_layer(
     if az.authorize(&principal, &host, rt, &name, op) {
         next.run(req).await
     } else {
-        (StatusCode::FORBIDDEN, "authorization denied").into_response()
+        crate::error::SrError::Forbidden.into_response()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use axum::http::StatusCode;
+
     use super::*;
 
     fn t(m: &str, p: &str) -> Option<(ResourceType, String, AclOperation)> {

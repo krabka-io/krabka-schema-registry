@@ -8,12 +8,12 @@ use serde::Deserialize;
 
 use crate::{
     error::SrError,
-    rest::{AppState, parse_concrete_version, response::ok_json},
+    rest::{AppState, deserialize_bool, parse_concrete_version, response::ok_json},
 };
 
 #[derive(Deserialize, Default)]
 pub struct PermanentQ {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_bool")]
     permanent: bool,
 }
 

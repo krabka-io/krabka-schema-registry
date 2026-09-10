@@ -12,7 +12,7 @@ use crate::{
     ids::{SchemaId, SchemaVersion},
     kafkastore::RegisterSchema,
     rest::{
-        AppState, DeletedQ, parse_optional_version,
+        AppState, DeletedQ, deserialize_bool, parse_optional_version,
         response::{ok_json, ok_raw},
     },
 };
@@ -34,7 +34,7 @@ struct RegisterBody {
 
 #[derive(Debug, Default, serde::Deserialize)]
 pub struct NormalizeQuery {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_bool")]
     normalize: bool,
 }
 
