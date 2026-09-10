@@ -2611,6 +2611,7 @@ dependencies = [
  "hex",
  "hyper",
  "hyper-util",
+ "krabka-audit",
  "krabka-authz",
  "krabka-broker",
  "krabka-client-admin",

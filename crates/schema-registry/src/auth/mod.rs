@@ -17,6 +17,7 @@ use axum::{
 };
 use base64::Engine as _;
 use basic::BasicAuthStore;
+use krabka_audit::{AuditEndpoint, AuditEvent, AuditLog, AuditOutcome, AuditPrincipal};
 use krabka_security::{AuthMethod, OAuthBearerValidator, Principal};
 
 /// An mTLS-authenticated principal that the TLS accept loop inserts.
@@ -28,6 +29,8 @@ pub struct MtlsPrincipal(pub Principal);
 /// clone, because the stores live behind `Arc`.
 #[derive(Clone)]
 pub struct AuthState {
+    /// Security audit event channel.
+    pub audit: Arc<AuditLog>,
     /// HTTP Basic credential store; `None` disables Basic.
     pub basic: Option<Arc<BasicAuthStore>>,
     /// Bearer (OAuth) token validator; `None` disables Bearer.
@@ -153,7 +156,72 @@ pub async fn auth_layer(
             req.extensions_mut().insert(p);
             next.run(req).await
         }
-        AuthDecision::Unauthorized => unauthorized(&st),
+        AuthDecision::Unauthorized => {
+            let authorization = req
+                .headers()
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok());
+            let (mechanism, name) = attempted_identity(authorization);
+            let source = req
+                .extensions()
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map_or(
+                    AuditEndpoint {
+                        ip: "unknown".into(),
+                        port: 0,
+                    },
+                    |axum::extract::ConnectInfo(peer)| AuditEndpoint {
+                        ip: peer.ip().to_string(),
+                        port: peer.port(),
+                    },
+                );
+            st.audit.emit(AuditEvent::Authentication {
+                outcome: AuditOutcome::Failure,
+                mechanism: mechanism.into(),
+                principal: AuditPrincipal {
+                    name,
+                    auth_method: mechanism.into(),
+                },
+                source,
+                reason: Some(format!(
+                    "{} {} authentication failed",
+                    req.method(),
+                    req.uri().path()
+                )),
+                time_ms: now,
+            });
+            unauthorized(&st)
+        }
+    }
+}
+
+fn attempted_identity(authorization: Option<&str>) -> (&'static str, String) {
+    if let Some(encoded) = authorization.and_then(|value| value.strip_prefix("Basic ")) {
+        let name = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .ok()
+            .and_then(|raw| String::from_utf8(raw).ok())
+            .and_then(|value| value.split_once(':').map(|(name, _)| name.to_owned()))
+            .unwrap_or_else(|| "unknown".into());
+        ("basic", name)
+    } else if authorization.is_some_and(|value| value.starts_with("Bearer ")) {
+        ("bearer", "unknown".into())
+    } else if authorization.is_some() {
+        ("unknown", "unknown".into())
+    } else {
+        ("none", "ANONYMOUS".into())
+    }
+}
+
+pub(crate) fn audit_auth_method(method: AuthMethod) -> &'static str {
+    match method {
+        AuthMethod::Anonymous => "none",
+        AuthMethod::SaslPlain => "basic",
+        AuthMethod::SaslOAuthBearer => "bearer",
+        AuthMethod::MTls => "mtls",
+        AuthMethod::SaslScramSha256 | AuthMethod::SaslScramSha512 | AuthMethod::SaslGssapi => {
+            "unknown"
+        }
     }
 }
 
@@ -183,7 +251,7 @@ fn unauthorized(st: &AuthState) -> Response {
 
 /// Current time as Unix epoch milliseconds, used to pass `now_ms` to
 /// [`OAuthBearerValidator::validate`]. Falls back to `0` on clock anomalies.
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -218,6 +286,7 @@ mod tests {
                 .collect(),
         );
         AuthState {
+            audit: AuditLog::disabled(),
             basic: Some(Arc::new(store)),
             bearer: None,
             require_auth,
@@ -285,6 +354,7 @@ mod tests {
             ..Default::default()
         });
         let st = AuthState {
+            audit: AuditLog::disabled(),
             basic: None,
             bearer: Some(Arc::new(validator)),
             require_auth: true,
@@ -309,6 +379,7 @@ mod tests {
     #[tokio::test]
     async fn presented_but_unconfigured_credential_cases_are_unauthorized() {
         let state = AuthState {
+            audit: AuditLog::disabled(),
             basic: None,
             bearer: None,
             require_auth: false,
@@ -366,6 +437,7 @@ mod tests {
         use tower::ServiceExt as _; // for `oneshot`
 
         let st = AuthState {
+            audit: AuditLog::disabled(),
             basic: None,
             bearer: None,
             require_auth: true,
@@ -434,6 +506,7 @@ mod tests {
         })
         .unwrap();
         let st = AuthState {
+            audit: AuditLog::disabled(),
             basic: Some(Arc::new(store)),
             bearer: None,
             require_auth: true,

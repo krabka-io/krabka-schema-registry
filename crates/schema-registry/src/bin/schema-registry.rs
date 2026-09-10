@@ -406,6 +406,35 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let shutdown = CancellationToken::new();
+    let (audit, mut audit_events) = krabka_audit::AuditLog::new(1024);
+    tokio::spawn(async move {
+        let product = krabka_audit::ProductInfo {
+            vendor_name: "Krabka".into(),
+            name: "Schema Registry".into(),
+            version: env!("CARGO_PKG_VERSION").into(),
+        };
+        while let Some(event) = audit_events.recv().await {
+            let record = krabka_audit::AuditRecord::from_event(&event, &product);
+            let body = String::from_utf8_lossy(&record.value);
+            let value = serde_json::from_slice::<serde_json::Value>(&record.value)
+                .unwrap_or(serde_json::Value::Null);
+            tracing::info!(
+                event_class = record.class.as_header(),
+                class_uid = value["class_uid"].as_i64().unwrap_or_default(),
+                status_id = value["status_id"].as_i64().unwrap_or_default(),
+                principal = value.pointer("/actor/user/name").and_then(serde_json::Value::as_str).unwrap_or_default(),
+                auth_protocol = value["auth_protocol"].as_str().unwrap_or_default(),
+                source_ip = value.pointer("/src_endpoint/ip").and_then(serde_json::Value::as_str).unwrap_or_default(),
+                operation = value["operation"].as_str().or_else(|| value.pointer("/api/operation").and_then(serde_json::Value::as_str)).unwrap_or_default(),
+                resource_type = value.pointer("/resources/0/type").and_then(serde_json::Value::as_str).unwrap_or_default(),
+                resource_name = value.pointer("/resources/0/name").and_then(serde_json::Value::as_str).unwrap_or_default(),
+                product = value.pointer("/metadata/product/name").and_then(serde_json::Value::as_str).unwrap_or_default(),
+                product_version = value.pointer("/metadata/product/version").and_then(serde_json::Value::as_str).unwrap_or_default(),
+                audit_record = %body,
+                "schema registry security audit"
+            );
+        }
+    });
 
     // ── JWKS refresh task (bearer=jwks only) ────────────────────────────────
     if let Some(jwks) = jwks_handle {
@@ -430,6 +459,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let bearer = cfg.security.bearer.as_ref().map(|b| b.validator.clone());
     let auth = AuthState {
+        audit: audit.clone(),
         basic,
         bearer,
         require_auth: cfg.security.require_auth,
@@ -440,7 +470,11 @@ async fn main() -> anyhow::Result<()> {
     // ── Authorization (+ ACL refresh task) ──────────────────────────────────
     let authz = match &cfg.security.authz {
         Some(a) if a.enabled => {
-            let az = Arc::new(SchemaRegistryAuthz::new(a.super_users.clone(), true));
+            let az = Arc::new(SchemaRegistryAuthz::with_audit(
+                a.super_users.clone(),
+                true,
+                audit.clone(),
+            ));
             let admin = AdminClient::connect_with_options(
                 &split_bootstrap(&cfg.bootstrap),
                 krabka_client_core::ConnectionOptions {

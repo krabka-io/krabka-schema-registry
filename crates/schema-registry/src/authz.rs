@@ -21,6 +21,9 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use krabka_audit::{
+    AuditEndpoint, AuditEvent, AuditLog, AuditOutcome, AuditPrincipal, AuditResource,
+};
 use krabka_authz::{AclCache, AuthorizationRequest, AuthorizationResult, Authorizer};
 use krabka_metadata::{AclOperation, ResourceType};
 use krabka_security::Principal;
@@ -147,6 +150,7 @@ pub fn authz_target(method: &Method, path: &str) -> Option<(ResourceType, String
 /// `ArcSwap`'d [`AclCache`] that [`Self::run_acl_refresh`] refreshes from the
 /// broker's `DescribeAcls`. It mirrors `grpc-gateway`'s `GatewayAuthz`.
 pub struct SchemaRegistryAuthz {
+    audit: Arc<AuditLog>,
     authorizer: Arc<dyn Authorizer>,
     cache: ArcSwap<AclCache>,
     super_users: HashSet<String>,
@@ -162,9 +166,16 @@ impl SchemaRegistryAuthz {
     /// same set.
     #[must_use]
     pub fn new(super_users: HashSet<String>, enabled: bool) -> Self {
+        Self::with_audit(super_users, enabled, AuditLog::disabled())
+    }
+
+    /// Build with an audit event channel.
+    #[must_use]
+    pub fn with_audit(super_users: HashSet<String>, enabled: bool, audit: Arc<AuditLog>) -> Self {
         let authorizer: Arc<dyn Authorizer> =
             Arc::new(krabka_authz::SimpleAclAuthorizer::new(super_users.clone()));
         Self {
+            audit,
             authorizer,
             cache: ArcSwap::from_pointee(AclCache::default()),
             super_users,
@@ -310,24 +321,59 @@ pub async fn authz_layer(
         .get::<Principal>()
         .cloned()
         .unwrap_or_else(crate::auth::anonymous);
-    let Some(host) = req
+    let host = req
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
-        .map(|ConnectInfo(host)| *host)
-    else {
+        .map(|ConnectInfo(host)| *host);
+    if host.is_none() {
         tracing::warn!("schema registry authorization request has no peer address");
-        return crate::error::SrError::Forbidden.into_response();
+    }
+    let allowed = host.is_some_and(|host| az.authorize(&principal, &host, rt, &name, op));
+    let source = host.map_or(
+        AuditEndpoint {
+            ip: "unknown".into(),
+            port: 0,
+        },
+        |host| AuditEndpoint {
+            ip: host.ip().to_string(),
+            port: host.port(),
+        },
+    );
+    let audit_principal = AuditPrincipal {
+        name: principal.name.clone(),
+        auth_method: crate::auth::audit_auth_method(principal.auth_method).into(),
     };
-    if az.authorize(&principal, &host, rt, &name, op) {
+    let operation = format!("{} {} {:?}", req.method(), req.uri().path(), op);
+    if allowed {
+        az.audit.emit(AuditEvent::AdminOperation {
+            outcome: AuditOutcome::Success,
+            principal: audit_principal,
+            source,
+            operation,
+            resources: vec![AuditResource {
+                resource_type: format!("{rt:?}"),
+                name,
+            }],
+            time_ms: crate::auth::now_ms(),
+        });
         next.run(req).await
     } else {
+        az.audit.emit(AuditEvent::AuthorizationDenied {
+            principal: audit_principal,
+            source,
+            resource_type: format!("{rt:?}"),
+            resource_name: name,
+            operation,
+            time_ms: crate::auth::now_ms(),
+        });
         crate::error::SrError::Forbidden.into_response()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use axum::http::StatusCode;
+    use axum::http::{StatusCode, header};
+    use base64::Engine as _;
 
     use super::*;
 
@@ -773,6 +819,163 @@ mod tests {
                 .await
                 .unwrap();
             assert2::assert!(response.status() == expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn security_outcomes_emit_redacted_audit_records() {
+        use krabka_audit::{AuditRecord, AuditSink as _, MemorySink, ProductInfo};
+
+        let (audit, mut events) = AuditLog::new(8);
+        let auth = crate::auth::AuthState {
+            audit: audit.clone(),
+            basic: Some(Arc::new(crate::auth::basic::BasicAuthStore::from_users(
+                [("alice".to_string(), "correct-password".to_string())]
+                    .into_iter()
+                    .collect(),
+            ))),
+            bearer: None,
+            require_auth: true,
+            realm: "schema-registry".into(),
+            forward_secret: None,
+        };
+        let authz = Arc::new(SchemaRegistryAuthz::with_audit(
+            HashSet::new(),
+            true,
+            audit.clone(),
+        ));
+        let app = Router::new()
+            .route("/subjects/{subject}/versions", post(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(
+                authz.clone(),
+                authz_layer,
+            ))
+            .layer(axum::middleware::from_fn_with_state(
+                Arc::new(auth),
+                crate::auth::auth_layer,
+            ));
+        let basic = |password: &str| {
+            format!(
+                "Basic {}",
+                base64::engine::general_purpose::STANDARD.encode(format!("alice:{password}"))
+            )
+        };
+        let bad_basic = basic("password-must-not-leak");
+        let good_basic = basic("correct-password");
+        let bearer = "Bearer bearer-token-must-not-leak";
+        let unknown = "Digest unsupported-credential-must-not-leak";
+        let mut emitted = Vec::new();
+
+        for (authorization, expected) in [
+            (bad_basic.as_str(), StatusCode::UNAUTHORIZED),
+            (bearer, StatusCode::UNAUTHORIZED),
+            (unknown, StatusCode::UNAUTHORIZED),
+            (good_basic.as_str(), StatusCode::FORBIDDEN),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/subjects/private/versions")
+                        .header(header::AUTHORIZATION, authorization)
+                        .extension(ConnectInfo("10.0.0.1:1234".parse::<SocketAddr>().unwrap()))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert2::assert!(response.status() == expected);
+            emitted.push(events.try_recv().expect("one audit event"));
+            assert2::assert!(events.try_recv().is_err());
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/subjects/private/versions")
+                    .header(header::AUTHORIZATION, &good_basic)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert2::assert!(response.status() == StatusCode::FORBIDDEN);
+        emitted.push(events.try_recv().expect("one audit event"));
+        assert2::assert!(events.try_recv().is_err());
+        authz.cache.store(Arc::new(AclCache::new(vec![AclEntry {
+            resource_type: ResourceType::Topic,
+            resource_name: "private".into(),
+            pattern_type: PatternType::Literal,
+            principal: "User:alice".into(),
+            host: "*".into(),
+            operation: AclOperation::Write,
+            permission_type: PermissionType::Allow,
+        }])));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/subjects/private/versions")
+                    .header(header::AUTHORIZATION, &good_basic)
+                    .extension(ConnectInfo("10.0.0.1:1234".parse::<SocketAddr>().unwrap()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert2::assert!(response.status() == StatusCode::OK);
+        emitted.push(events.try_recv().expect("one audit event"));
+        assert2::assert!(events.try_recv().is_err());
+
+        let sink = MemorySink::default();
+        let product = ProductInfo {
+            vendor_name: "Krabka".into(),
+            name: "Schema Registry".into(),
+            version: env!("CARGO_PKG_VERSION").into(),
+        };
+        for event in &emitted {
+            sink.write(AuditRecord::from_event(event, &product))
+                .await
+                .unwrap();
+        }
+        let records = sink.records();
+        assert2::assert!(records.len() == 6);
+        let bodies = records
+            .iter()
+            .map(|record| serde_json::from_slice::<serde_json::Value>(&record.value).unwrap())
+            .collect::<Vec<_>>();
+        assert2::assert!(bodies[0]["status_id"] == 2);
+        assert2::assert!(bodies[0]["auth_protocol"] == "basic");
+        assert2::assert!(bodies[0]["actor"]["user"]["name"] == "alice");
+        assert2::assert!(bodies[0]["src_endpoint"]["ip"] == "10.0.0.1");
+        assert2::assert!(
+            bodies[0]["status_detail"] == "POST /subjects/private/versions authentication failed"
+        );
+        assert2::assert!(bodies[1]["auth_protocol"] == "bearer");
+        assert2::assert!(bodies[1]["actor"]["user"]["name"] == "unknown");
+        assert2::assert!(bodies[2]["auth_protocol"] == "unknown");
+        assert2::assert!(bodies[3]["status_id"] == 2);
+        assert2::assert!(bodies[3]["actor"]["user"]["type"] == "basic");
+        assert2::assert!(bodies[3]["operation"] == "POST /subjects/private/versions Write");
+        assert2::assert!(bodies[3]["resources"][0]["type"] == "Topic");
+        assert2::assert!(bodies[3]["resources"][0]["name"] == "private");
+        assert2::assert!(bodies[4]["src_endpoint"]["ip"] == "unknown");
+        assert2::assert!(bodies[5]["status_id"] == 1);
+        assert2::assert!(bodies[5]["api"]["operation"] == "POST /subjects/private/versions Write");
+        let bodies = serde_json::to_string(&bodies).unwrap();
+        for secret in [
+            "password-must-not-leak",
+            "correct-password",
+            "bearer-token-must-not-leak",
+            "unsupported-credential-must-not-leak",
+            bad_basic.as_str(),
+            good_basic.as_str(),
+            bearer,
+            unknown,
+        ] {
+            assert2::assert!(!bodies.contains(secret));
         }
     }
 }

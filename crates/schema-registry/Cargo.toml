@@ -41,6 +41,7 @@ krabka-client-producer = { version = "0.4.0" }
 krabka-protocol = { version = "0.4.0", default-features = false }
 krabka-security = { version = "0.4.0" }
 krabka-authz = { version = "0.4.0" }
+krabka-audit = { version = "0.4.0" }
 krabka-metadata = { version = "0.4.0" }
 krabka-telemetry = { version = "0.4.0" }
 krabka-units = { workspace = true }
