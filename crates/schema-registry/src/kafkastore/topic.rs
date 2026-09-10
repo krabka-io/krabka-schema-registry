@@ -4,14 +4,40 @@
 
 use std::collections::BTreeMap;
 
-use krabka_client_admin::{AdminClient, CreateTopicSpec};
-use krabka_client_core::ClientSecurity;
+use krabka_client_admin::{AdminClient, AdminError, CreateTopicSpec};
+use krabka_client_core::{ClientError, ClientSecurity};
 use krabka_protocol::primitives::uuid::Uuid as WireUuid;
 use krabka_units::prelude::*;
 
 use crate::config::RegistryConfig;
 
 const TOPIC_ALREADY_EXISTS: i16 = 36;
+
+fn transient_topic_error(code: i16) -> bool {
+    matches!(code, 3 | 5 | 6 | 100)
+}
+
+fn retryable_admin_error(error: &AdminError) -> bool {
+    match error {
+        AdminError::Connect { .. }
+        | AdminError::Transport(
+            ClientError::Connect { .. }
+            | ClientError::Disconnected
+            | ClientError::Timeout(_)
+            | ClientError::Io(_),
+        ) => true,
+        AdminError::Broker { code, .. } => transient_topic_error(*code),
+        _ => false,
+    }
+}
+
+fn compact_only(policy: &str) -> bool {
+    let mut values = policy
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    values.next() == Some("compact") && values.next().is_none()
+}
 
 fn schemas_topic_spec(cfg: &RegistryConfig) -> (CreateTopicSpec, Time) {
     (
@@ -63,22 +89,76 @@ pub async fn ensure_schemas_topic(
     let outcomes = admin.create_topics(&[spec], timeout).await?;
     if let Some(o) = outcomes.into_iter().next() {
         match o.error {
-            None => {
-                if let Some(id) = o.topic_id {
-                    return Ok(to_wire_uuid(id));
-                }
-            }
+            None => {}
             Some(e) if e.code == TOPIC_ALREADY_EXISTS => {}
             Some(e) => anyhow::bail!("create _schemas failed: {} ({})", e.name, e.code),
         }
     }
-    let md = admin.metadata(&[cfg.schemas_topic.as_str()]).await?;
-    let entry = md
-        .topics
-        .into_iter()
-        .find(|t| t.name == cfg.schemas_topic)
-        .ok_or_else(|| anyhow::anyhow!("_schemas not found after create"))?;
-    Ok(entry.topic_id.map_or(WireUuid::ZERO, to_wire_uuid))
+    let deadline = tokio::time::Instant::now() + timeout.to_std();
+    loop {
+        let md = match admin.metadata(&[cfg.schemas_topic.as_str()]).await {
+            Ok(md) => md,
+            Err(error)
+                if retryable_admin_error(&error) && tokio::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(millis(100).to_std()).await;
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let Some(entry) = md
+            .topics
+            .into_iter()
+            .find(|entry| entry.name == cfg.schemas_topic)
+        else {
+            if tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(millis(100).to_std()).await;
+                continue;
+            }
+            anyhow::bail!("{} not found after create", cfg.schemas_topic);
+        };
+        if let Some(error) = entry.error.as_ref() {
+            if transient_topic_error(error.code) && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(millis(100).to_std()).await;
+                continue;
+            }
+            anyhow::bail!(
+                "{} metadata failed: {} ({})",
+                cfg.schemas_topic,
+                error.name,
+                error.code
+            );
+        }
+        if entry.partition_count != 1 {
+            anyhow::bail!(
+                "{} must have exactly 1 partition; observed {}",
+                cfg.schemas_topic,
+                entry.partition_count
+            );
+        }
+        let configs = match admin.describe_configs(&[cfg.schemas_topic.as_str()]).await {
+            Ok(configs) => configs,
+            Err(error)
+                if retryable_admin_error(&error) && tokio::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(millis(100).to_std()).await;
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let cleanup_policy = configs
+            .into_iter()
+            .find(|config| config.topic == cfg.schemas_topic)
+            .and_then(|config| config.overrides.get("cleanup.policy").cloned());
+        if !cleanup_policy.as_deref().is_some_and(compact_only) {
+            anyhow::bail!(
+                "{} cleanup.policy must be compact only; observed {}",
+                cfg.schemas_topic,
+                cleanup_policy.as_deref().unwrap_or("<unset>")
+            );
+        }
+        return Ok(entry.topic_id.map_or(WireUuid::ZERO, to_wire_uuid));
+    }
 }
 
 /// Convert admin's `uuid::Uuid` to the protocol `WireUuid`. The byte order is
@@ -91,7 +171,7 @@ fn to_wire_uuid(id: uuid::Uuid) -> WireUuid {
 mod tests {
     use krabka_units::prelude::*;
 
-    use super::{schemas_topic_spec, to_wire_uuid};
+    use super::{compact_only, schemas_topic_spec, to_wire_uuid, transient_topic_error};
     use crate::config::{RegistryConfig, RegistryRuntimeConfig, SecurityConfig};
 
     #[test]
@@ -119,5 +199,14 @@ mod tests {
         let u = uuid::Uuid::from_u128(0x1234_5678_9abc_def0_1122_3344_5566_7788);
         let wire = to_wire_uuid(u);
         assert2::check!(wire.0 == *u.as_bytes());
+    }
+
+    #[test]
+    fn topic_policy_validation_is_strict_and_transient_codes_are_named() {
+        assert2::check!(compact_only("compact"));
+        assert2::check!(!compact_only("compact,delete"));
+        assert2::check!(!compact_only("delete"));
+        assert2::check!([3, 5, 6, 100].into_iter().all(transient_topic_error));
+        assert2::check!(!transient_topic_error(29));
     }
 }

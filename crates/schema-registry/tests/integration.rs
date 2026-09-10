@@ -8,11 +8,15 @@
 //! runtime cannot drive the broker's accept loop at the same time as the
 //! registry's producer and reader tasks and the test body.
 
+use std::collections::BTreeMap;
+
 use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use krabka_broker::{Broker, BrokerConfig};
+use krabka_broker::{BootstrapMode, Broker, BrokerConfig, BrokerHandle, NodeId};
+use krabka_client_admin::{AdminClient, CreateTopicSpec};
+use krabka_client_core::Client;
 use krabka_schema_registry::{
     config::{RegistryConfig, SecurityConfig},
     format::SchemaType,
@@ -31,6 +35,93 @@ use prost_reflect::{
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
+fn registry_cfg(bootstrap: &str, schemas_topic: &str, rf: i32) -> RegistryConfig {
+    RegistryConfig {
+        bootstrap: bootstrap.into(),
+        schemas_topic: schemas_topic.into(),
+        schemas_topic_rf: rf,
+        client_id: "sr-it".into(),
+        advertised_url: "http://127.0.0.1:0".into(),
+        group_id: "schema-registry".into(),
+        leader_eligibility: true,
+        runtime: krabka_schema_registry::config::RegistryRuntimeConfig::default(),
+        security: SecurityConfig::default(),
+    }
+}
+
+async fn start_three_broker_cluster() -> Vec<(BrokerHandle, tempfile::TempDir)> {
+    let mut client_listeners = Vec::new();
+    let mut controller_listeners = Vec::new();
+    for _ in 0..3 {
+        client_listeners.push(tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap());
+        controller_listeners.push(tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap());
+    }
+    let client_addrs: Vec<_> = client_listeners
+        .iter()
+        .map(|listener| listener.local_addr().unwrap())
+        .collect();
+    let controller_addrs: Vec<_> = controller_listeners
+        .iter()
+        .map(|listener| listener.local_addr().unwrap())
+        .collect();
+    let voters: Vec<_> = controller_addrs
+        .iter()
+        .enumerate()
+        .map(|(index, addr)| (NodeId(u64::try_from(index + 1).unwrap()), addr.to_string()))
+        .collect();
+    let mut starts = Vec::new();
+    let mut dirs = Vec::new();
+    for (index, (client_listener, controller_listener)) in client_listeners
+        .into_iter()
+        .zip(controller_listeners)
+        .enumerate()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let node_id = NodeId(u64::try_from(index + 1).unwrap());
+        let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+        cfg.broker_id = i32::try_from(index + 1).unwrap();
+        cfg.node_id = node_id;
+        cfg.listen_addr = client_addrs[index];
+        cfg.advertised_listener = client_addrs[index].to_string();
+        cfg.controller_listen_addr = controller_addrs[index];
+        cfg.directory_id = uuid::Uuid::from_u128(u128::from(node_id.0));
+        cfg.bootstrap_mode = BootstrapMode::Bootstrap;
+        cfg.controller_quorum_voters.clone_from(&voters);
+        cfg.auto_join = false;
+        cfg.bootstrap_servers.clear();
+        starts.push(tokio::spawn(Broker::start_with_listeners(
+            cfg,
+            Some(controller_listener),
+            Some(client_listener),
+        )));
+        dirs.push(dir);
+    }
+    let mut cluster = Vec::new();
+    for (start, dir) in starts.into_iter().zip(dirs) {
+        cluster.push((start.await.unwrap().unwrap(), dir));
+    }
+    let metadata_client = Client::builder()
+        .bootstrap(cluster[0].0.listen_addr().to_string())
+        .build()
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            if metadata_client
+                .refresh_metadata()
+                .await
+                .is_ok_and(|metadata| metadata.brokers.len() == 3)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("all brokers must register");
+    cluster
+}
+
 async fn boot_registry(
     rf: i32,
 ) -> (
@@ -43,20 +134,157 @@ async fn boot_registry(
     let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
         .await
         .unwrap();
-    let cfg = RegistryConfig {
-        bootstrap: broker.listen_addr().to_string(),
-        schemas_topic: "_schemas".into(),
-        schemas_topic_rf: rf,
-        client_id: "sr-it".into(),
-        advertised_url: "http://127.0.0.1:0".into(),
-        group_id: "schema-registry".into(),
-        leader_eligibility: true,
-        runtime: krabka_schema_registry::config::RegistryRuntimeConfig::default(),
-        security: SecurityConfig::default(),
-    };
+    let cfg = registry_cfg(&broker.listen_addr().to_string(), "_schemas", rf);
     let cancel = CancellationToken::new();
     let store = KafkaStore::start(&cfg, cancel.clone()).await.unwrap();
     (broker, store, cancel, dir)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_rejects_invalid_schema_topic_layout() {
+    let dir = tempfile::tempdir().unwrap();
+    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+        .await
+        .unwrap();
+    let bootstrap = broker.listen_addr().to_string();
+    let mut admin = AdminClient::connect(std::slice::from_ref(&bootstrap))
+        .await
+        .unwrap();
+    let outcomes = admin
+        .create_topics(
+            &[
+                CreateTopicSpec {
+                    name: "_schemas".into(),
+                    partitions: 2,
+                    replicas: 1,
+                    configs: BTreeMap::from([("cleanup.policy".into(), "compact".into())]),
+                },
+                CreateTopicSpec {
+                    name: "_schemas-delete".into(),
+                    partitions: 1,
+                    replicas: 1,
+                    configs: BTreeMap::from([("cleanup.policy".into(), "delete".into())]),
+                },
+            ],
+            krabka_units::secs(10),
+        )
+        .await
+        .unwrap();
+    assert2::assert!(
+        outcomes.iter().all(|outcome| outcome.error.is_none()),
+        "{outcomes:?}"
+    );
+
+    for (topic, expected) in [
+        ("_schemas", "must have exactly 1 partition; observed 2"),
+        (
+            "_schemas-delete",
+            "cleanup.policy must be compact only; observed delete",
+        ),
+    ] {
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            KafkaStore::start(
+                &registry_cfg(&bootstrap, topic, 1),
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("invalid topic validation must not hang");
+        let Err(error) = result else {
+            panic!("invalid schema topic unexpectedly started")
+        };
+        assert2::assert!(error.to_string().contains(expected));
+    }
+
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reader_routes_to_schema_partition_leader() {
+    let cluster = start_three_broker_cluster().await;
+    let mut admin = AdminClient::connect(&[cluster[0].0.listen_addr().to_string()])
+        .await
+        .unwrap();
+    let outcome = admin
+        .create_topics(
+            &[CreateTopicSpec {
+                name: "_schemas".into(),
+                partitions: 1,
+                replicas: 1,
+                configs: BTreeMap::from([("cleanup.policy".into(), "compact".into())]),
+            }],
+            krabka_units::secs(10),
+        )
+        .await
+        .unwrap();
+    assert2::assert!(outcome[0].error.is_none());
+    let metadata_client = Client::builder()
+        .bootstrap(cluster[0].0.listen_addr().to_string())
+        .build()
+        .await
+        .unwrap();
+    let leader = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let metadata = metadata_client.refresh_metadata().await.unwrap();
+            if let Some(leader) = metadata
+                .topics
+                .iter()
+                .find(|topic| topic.name.as_deref() == Some("_schemas"))
+                .and_then(|topic| topic.partitions.first())
+                .map(|partition| partition.leader_id)
+                .filter(|leader| *leader >= 0)
+            {
+                break leader;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("schema partition must elect a leader");
+    let leader_addr = cluster[usize::try_from(leader - 1).unwrap()]
+        .0
+        .listen_addr();
+    let nonleader = cluster
+        .iter()
+        .enumerate()
+        .find(|(index, _)| i32::try_from(index + 1).unwrap() != leader)
+        .unwrap()
+        .1
+        .0
+        .listen_addr()
+        .to_string();
+    let bootstrap = format!("{nonleader},{leader_addr}");
+    let cancel = CancellationToken::new();
+    let store = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        KafkaStore::start(&registry_cfg(&bootstrap, "_schemas", 1), cancel.clone()),
+    )
+    .await
+    .expect("reader bootstrapped at a nonleader must start")
+    .unwrap();
+    let registered = store
+        .register(RegisterSchema {
+            subject: "leader-routed",
+            ty: SchemaType::Avro,
+            schema: r#"{"type":"string"}"#,
+            references: &[],
+            message_type: None,
+            import_id: None,
+            import_version: None,
+        })
+        .await
+        .unwrap();
+    assert2::assert!(registered.version == SchemaVersion(1));
+    let app = rest::router(AppState { store });
+    assert2::assert!(
+        get_json(&app, "/subjects/leader-routed/versions").await == serde_json::json!([1])
+    );
+
+    cancel.cancel();
+    for (broker, _) in cluster {
+        broker.shutdown().await;
+    }
 }
 
 async fn body_json(resp: axum::response::Response) -> serde_json::Value {
