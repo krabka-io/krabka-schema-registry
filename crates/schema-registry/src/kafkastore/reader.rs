@@ -44,35 +44,61 @@ pub struct StoreReader {
 }
 
 #[derive(Default)]
+struct Barriers {
+    pending: HashSet<Uuid>,
+    seen: HashSet<Uuid>,
+    invalidated: HashSet<Uuid>,
+}
+
+#[derive(Default)]
 pub struct BarrierTracker {
-    pending: RwLock<HashSet<Uuid>>,
-    seen: RwLock<HashSet<Uuid>>,
+    state: RwLock<Barriers>,
+}
+
+pub enum BarrierPoll {
+    Pending,
+    Seen,
+    Invalidated,
 }
 
 impl BarrierTracker {
     pub fn reserve(&self) -> Uuid {
         let token = Uuid::new_v4();
-        self.pending.write().insert(token);
+        self.state.write().pending.insert(token);
         token
     }
 
     pub(crate) fn observe(&self, token: Uuid) {
-        if self.pending.read().contains(&token) {
-            self.seen.write().insert(token);
+        let mut state = self.state.write();
+        if state.pending.contains(&token) {
+            state.seen.insert(token);
         }
     }
 
-    pub fn consume(&self, token: Uuid) -> bool {
-        if !self.seen.write().remove(&token) {
-            return false;
+    pub fn poll(&self, token: Uuid) -> BarrierPoll {
+        let mut state = self.state.write();
+        if state.invalidated.remove(&token) {
+            return BarrierPoll::Invalidated;
         }
-        self.pending.write().remove(&token);
-        true
+        if !state.seen.remove(&token) {
+            return BarrierPoll::Pending;
+        }
+        state.pending.remove(&token);
+        BarrierPoll::Seen
     }
 
     pub fn cancel(&self, token: Uuid) {
-        self.pending.write().remove(&token);
-        self.seen.write().remove(&token);
+        let mut state = self.state.write();
+        state.pending.remove(&token);
+        state.seen.remove(&token);
+        state.invalidated.remove(&token);
+    }
+
+    pub(crate) fn invalidate_all(&self) {
+        let mut state = self.state.write();
+        let pending = std::mem::take(&mut state.pending);
+        state.seen.clear();
+        state.invalidated.extend(pending);
     }
 }
 
@@ -428,6 +454,9 @@ pub fn spawn(
             let conn = match connect_topic_leader(&bootstrap, &opts, &topic, topic_id).await {
                 Ok((conn, resolved_topic_id)) => {
                     if topic_id != WireUuid::ZERO && resolved_topic_id != topic_id {
+                        observed_barriers.clear();
+                        barriers_bg.invalidate_all();
+                        barrier_tx.send_modify(|version| *version += 1);
                         tracing::warn!(
                             old_topic_id = ?topic_id,
                             new_topic_id = ?resolved_topic_id,

@@ -701,11 +701,21 @@ impl KafkaStore {
 
     async fn await_barrier(&self, barrier: BarrierGuard) -> Result<(), SrError> {
         let mut rx = self.barrier_rx.clone();
-        while !self.barriers.consume(barrier.token) {
-            if rx.changed().await.is_err() {
-                return Err(SrError::Backend(
-                    "schema-store reader stopped before applying the write".into(),
-                ));
+        loop {
+            match self.barriers.poll(barrier.token) {
+                reader::BarrierPoll::Seen => break,
+                reader::BarrierPoll::Invalidated => {
+                    return Err(SrError::Backend(
+                        "schema topic was replaced before applying the write".into(),
+                    ));
+                }
+                reader::BarrierPoll::Pending => {
+                    if rx.changed().await.is_err() {
+                        return Err(SrError::Backend(
+                            "schema-store reader stopped before applying the write".into(),
+                        ));
+                    }
+                }
             }
         }
         barrier.finish("schema-store barrier cleanup failed").await;
@@ -725,22 +735,29 @@ async fn await_barrier_rx(
     barrier: uuid::Uuid,
     cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
-    while !barriers.consume(barrier) {
-        tokio::select! {
-            biased;
-            () = cancel.cancelled() => {
-                barriers.cancel(barrier);
-                anyhow::bail!("schema-store startup cancelled during replay");
+    loop {
+        match barriers.poll(barrier) {
+            reader::BarrierPoll::Seen => return Ok(()),
+            reader::BarrierPoll::Invalidated => {
+                anyhow::bail!("schema topic was replaced during initial replay");
             }
-            changed = rx.changed() => {
-                if changed.is_err() {
-                    barriers.cancel(barrier);
-                    anyhow::bail!("schema-store reader stopped during initial replay");
+            reader::BarrierPoll::Pending => {
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => {
+                        barriers.cancel(barrier);
+                        anyhow::bail!("schema-store startup cancelled during replay");
+                    }
+                    changed = rx.changed() => {
+                        if changed.is_err() {
+                            barriers.cancel(barrier);
+                            anyhow::bail!("schema-store reader stopped during initial replay");
+                        }
+                    }
                 }
             }
         }
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -764,6 +781,31 @@ mod tests {
         barriers.observe(wanted);
         tx.send(2).unwrap();
         task.await.unwrap().unwrap();
-        assert2::check!(barriers.consume(other));
+        assert2::check!(matches!(barriers.poll(other), reader::BarrierPoll::Seen));
+    }
+
+    #[tokio::test]
+    async fn topic_replacement_rejects_waiting_barriers() {
+        let barriers = Arc::new(reader::BarrierTracker::default());
+        let wanted = barriers.reserve();
+        barriers.observe(wanted);
+        barriers.invalidate_all();
+        let (_tx, rx) = watch::channel(1);
+        let cancel = CancellationToken::new();
+
+        let error = await_barrier_rx(rx, barriers, wanted, &cancel)
+            .await
+            .unwrap_err();
+        assert2::check!(error.to_string().contains("replaced"));
+    }
+
+    #[test]
+    fn cancelled_barriers_ignore_late_observations() {
+        let barriers = reader::BarrierTracker::default();
+        let token = barriers.reserve();
+        barriers.cancel(token);
+        barriers.observe(token);
+
+        assert2::check!(matches!(barriers.poll(token), reader::BarrierPoll::Pending));
     }
 }
