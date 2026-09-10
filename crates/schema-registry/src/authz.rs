@@ -16,7 +16,7 @@ use std::{collections::HashSet, net::SocketAddr, sync::Arc};
 
 use arc_swap::ArcSwap;
 use axum::{
-    extract::{Request, State},
+    extract::{ConnectInfo, Request, State},
     http::Method,
     middleware::Next,
     response::{IntoResponse, Response},
@@ -310,14 +310,14 @@ pub async fn authz_layer(
         .get::<Principal>()
         .cloned()
         .unwrap_or_else(crate::auth::anonymous);
-    // The TLS accept loop inserts the peer `SocketAddr` into extensions (the
-    // gateway pattern); fall back to a wildcard host when it is absent (e.g.
-    // plain HTTP without peer wiring). Host-scoped ACLs are rare.
-    let host: SocketAddr = req
+    let Some(host) = req
         .extensions()
-        .get::<SocketAddr>()
-        .copied()
-        .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 0)));
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(host)| *host)
+    else {
+        tracing::warn!("schema registry authorization request has no peer address");
+        return crate::error::SrError::Forbidden.into_response();
+    };
     if az.authorize(&principal, &host, rt, &name, op) {
         next.run(req).await
     } else {
@@ -761,7 +761,10 @@ mod tests {
                 permission_type: PermissionType::Allow,
             });
             let app = authz_app(with_acls(HashSet::new(), true, acls.into_iter().collect()));
-            let mut request = Request::builder().method(method).uri(path);
+            let mut request = Request::builder()
+                .method(method)
+                .uri(path)
+                .extension(ConnectInfo(host()));
             if forwarded {
                 request = request.extension(crate::auth::AuthenticatedForward);
             }
