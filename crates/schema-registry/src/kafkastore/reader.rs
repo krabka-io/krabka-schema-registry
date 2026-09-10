@@ -5,14 +5,23 @@
 
 use std::{
     net::{SocketAddr, ToSocketAddrs},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use krabka_client_core::{
     ClientError, ClientSecurity, Connection, ConnectionOptions, DEFAULT_FETCH_RESPONSE_MAX,
     FetchMinBytes, IsolatedFetch, fetch_partition_with_isolation_progress,
 };
-use krabka_protocol::primitives::uuid::Uuid as WireUuid;
+use krabka_protocol::{
+    owned::{
+        list_offsets_request::{ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic},
+        metadata_request::{MetadataRequest, MetadataRequestTopic},
+    },
+    primitives::uuid::Uuid as WireUuid,
+};
 use krabka_units::prelude::*;
 use parking_lot::RwLock;
 use tokio::sync::watch;
@@ -28,6 +37,15 @@ use crate::{
 pub struct StoreReader {
     pub store: Arc<RwLock<StoreState>>,
     pub applied_rx: watch::Receiver<i64>,
+    failures: Arc<AtomicU64>,
+}
+
+impl StoreReader {
+    /// Number of reader connection, metadata, Fetch, and offset-reset failures.
+    #[must_use]
+    pub fn failure_count(&self) -> u64 {
+        self.failures.load(Ordering::Relaxed)
+    }
 }
 
 /// `PartialEq` but not `Eq`, because the quantities store `f64`.
@@ -50,10 +68,16 @@ fn reader_policy(runtime: &RegistryRuntimeConfig) -> ReaderPolicy {
 enum FetchErrorAction {
     Reconnect,
     RetrySameConnection,
+    ResetToLogStart,
+    RefreshTopic,
 }
 
 fn fetch_error_action(e: &ClientError) -> FetchErrorAction {
     match e {
+        ClientError::Server { error_code: 1 } => FetchErrorAction::ResetToLogStart,
+        ClientError::Server {
+            error_code: 3 | 6 | 100,
+        } => FetchErrorAction::RefreshTopic,
         ClientError::Connect { .. }
         | ClientError::Disconnected
         | ClientError::Timeout(_)
@@ -62,11 +86,130 @@ fn fetch_error_action(e: &ClientError) -> FetchErrorAction {
     }
 }
 
-fn resolve_bootstrap_addr(bootstrap: &str) -> Option<SocketAddr> {
+fn resolve_bootstrap_addrs(bootstrap: &str) -> Vec<SocketAddr> {
     bootstrap
         .split(',')
         .filter_map(|b| b.trim().to_socket_addrs().ok())
-        .find_map(|mut addrs| addrs.next())
+        .flatten()
+        .collect()
+}
+
+fn should_log_failure(consecutive: u64) -> bool {
+    consecutive == 1 || consecutive.is_power_of_two()
+}
+
+async fn connect_topic_leader(
+    bootstrap: &str,
+    opts: &ConnectionOptions,
+    topic: &str,
+    current_topic_id: WireUuid,
+) -> Result<(Connection, WireUuid), ClientError> {
+    let mut last_error = ClientError::Disconnected;
+    let mut bootstrap_conn = None;
+    for addr in resolve_bootstrap_addrs(bootstrap) {
+        match Connection::connect_with_options(addr, opts.clone()).await {
+            Ok(conn) => {
+                bootstrap_conn = Some(conn);
+                break;
+            }
+            Err(error) => last_error = error,
+        }
+    }
+    let conn = bootstrap_conn.ok_or(last_error)?;
+    let metadata = conn
+        .send(MetadataRequest {
+            topics: Some(vec![MetadataRequestTopic {
+                topic_id: WireUuid::ZERO,
+                name: Some(topic.to_owned()),
+                ..Default::default()
+            }]),
+            allow_auto_topic_creation: false,
+            ..Default::default()
+        })
+        .await?;
+    let topic_metadata = metadata
+        .topics
+        .iter()
+        .find(|entry| entry.name.as_deref() == Some(topic))
+        .ok_or(ClientError::Server { error_code: 3 })?;
+    if topic_metadata.error_code != 0 {
+        return Err(ClientError::Server {
+            error_code: topic_metadata.error_code,
+        });
+    }
+    let partition = topic_metadata
+        .partitions
+        .iter()
+        .find(|partition| partition.partition_index == 0)
+        .ok_or(ClientError::Server { error_code: 3 })?;
+    if partition.error_code != 0 {
+        return Err(ClientError::Server {
+            error_code: partition.error_code,
+        });
+    }
+    let topic_id = if topic_metadata.topic_id == WireUuid::ZERO {
+        current_topic_id
+    } else {
+        topic_metadata.topic_id
+    };
+    let Some(leader) = metadata
+        .brokers
+        .iter()
+        .find(|broker| broker.node_id == partition.leader_id && broker.port > 0)
+    else {
+        return Ok((conn, topic_id));
+    };
+    let Some(addr) = format!("{}:{}", leader.host, leader.port)
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut addrs| addrs.next())
+    else {
+        return Err(ClientError::InvalidConfig(format!(
+            "cannot resolve leader {}:{} for {topic}-0",
+            leader.host, leader.port
+        )));
+    };
+    conn.close();
+    Ok((
+        Connection::connect_with_options(addr, opts.clone()).await?,
+        topic_id,
+    ))
+}
+
+async fn log_start_offset(conn: &Connection, topic: &str) -> Result<i64, ClientError> {
+    let response = conn
+        .send(ListOffsetsRequest {
+            replica_id: -1,
+            isolation_level: 1,
+            topics: vec![ListOffsetsTopic {
+                name: topic.to_owned(),
+                partitions: vec![ListOffsetsPartition {
+                    partition_index: 0,
+                    timestamp: -2,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await?;
+    let partition = response
+        .topics
+        .iter()
+        .find(|entry| entry.name == topic)
+        .and_then(|entry| {
+            entry
+                .partitions
+                .iter()
+                .find(|partition| partition.partition_index == 0)
+        })
+        .ok_or(ClientError::Server { error_code: 3 })?;
+    if partition.error_code != 0 {
+        return Err(ClientError::Server {
+            error_code: partition.error_code,
+        });
+    }
+    Ok(partition.offset)
 }
 
 async fn sleep_or_cancel(cancel: &CancellationToken, duration: Time) -> bool {
@@ -150,6 +293,8 @@ pub fn spawn(
     let policy = reader_policy(&cfg.runtime);
     let dispatch_queue_capacity = cfg.runtime.client_dispatch_queue_capacity;
     let frame_max = cfg.runtime.client_frame_max;
+    let failures = Arc::new(AtomicU64::new(0));
+    let failures_bg = failures.clone();
 
     tokio::spawn(async move {
         let opts = ConnectionOptions {
@@ -160,18 +305,24 @@ pub fn spawn(
             ..Default::default()
         };
         let mut next = 0_i64;
+        let mut topic_id = topic_id;
+        let mut consecutive_failures = 0_u64;
         loop {
-            let Some(addr) = resolve_bootstrap_addr(&bootstrap) else {
-                tracing::error!(%bootstrap, "store reader: bad bootstrap addr; backing off");
-                if sleep_or_cancel(&cancel, policy.retry_backoff).await {
-                    return;
+            let conn = match connect_topic_leader(&bootstrap, &opts, &topic, topic_id).await {
+                Ok((conn, resolved_topic_id)) => {
+                    topic_id = resolved_topic_id;
+                    conn
                 }
-                continue;
-            };
-            let conn = match Connection::connect_with_options(addr, opts.clone()).await {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!(error = %e, "store reader: connect failed; backing off");
+                Err(error) => {
+                    consecutive_failures += 1;
+                    failures_bg.fetch_add(1, Ordering::Relaxed);
+                    if should_log_failure(consecutive_failures) {
+                        tracing::warn!(
+                            error = %error,
+                            consecutive_failures,
+                            "store reader: leader resolution failed; backing off"
+                        );
+                    }
                     if sleep_or_cancel(&cancel, policy.retry_backoff).await {
                         return;
                     }
@@ -199,6 +350,7 @@ pub fn spawn(
                     }) => {
                         match res {
                             Ok(progress) => {
+                                consecutive_failures = 0;
                                 for r in progress.records {
                                     if r.offset < next {
                                         continue;
@@ -217,22 +369,55 @@ pub fn spawn(
                                     let _ = applied_tx.send(next - 1);
                                 }
                             }
-                            Err(e) => {
-                                let action = fetch_error_action(&e);
-                                tracing::warn!(
-                                    error = %e,
-                                    action = ?action,
-                                    "store reader: fetch error; backing off"
-                                );
-                                if action == FetchErrorAction::Reconnect {
-                                    conn.close();
-                                    if sleep_or_cancel(&cancel, policy.retry_backoff).await {
-                                        return;
+                            Err(error) => {
+                                let action = fetch_error_action(&error);
+                                consecutive_failures += 1;
+                                failures_bg.fetch_add(1, Ordering::Relaxed);
+                                if should_log_failure(consecutive_failures) {
+                                    tracing::warn!(
+                                        error = %error,
+                                        action = ?action,
+                                        consecutive_failures,
+                                        "store reader: fetch error; backing off"
+                                    );
+                                }
+                                if action == FetchErrorAction::ResetToLogStart {
+                                    match log_start_offset(&conn, &topic).await {
+                                        Ok(offset) => {
+                                            tracing::warn!(
+                                                fetch_offset = next,
+                                                log_start_offset = offset,
+                                                "store reader: requested history was compacted away; resetting to log start"
+                                            );
+                                            next = offset;
+                                        }
+                                        Err(reset_error) => {
+                                            consecutive_failures += 1;
+                                            failures_bg.fetch_add(1, Ordering::Relaxed);
+                                            if should_log_failure(consecutive_failures) {
+                                                tracing::warn!(
+                                                    error = %reset_error,
+                                                    consecutive_failures,
+                                                    "store reader: log-start reset failed; backing off"
+                                                );
+                                            }
+                                            conn.close();
+                                            if sleep_or_cancel(&cancel, policy.retry_backoff).await {
+                                                return;
+                                            }
+                                            break;
+                                        }
                                     }
-                                    break;
                                 }
                                 if sleep_or_cancel(&cancel, policy.retry_backoff).await {
                                     return;
+                                }
+                                if matches!(
+                                    action,
+                                    FetchErrorAction::Reconnect | FetchErrorAction::RefreshTopic
+                                ) {
+                                    conn.close();
+                                    break;
                                 }
                             }
                         }
@@ -242,7 +427,11 @@ pub fn spawn(
         }
     });
 
-    StoreReader { store, applied_rx }
+    StoreReader {
+        store,
+        applied_rx,
+        failures,
+    }
 }
 
 #[cfg(test)]
@@ -302,8 +491,28 @@ mod tests {
     }
 
     #[test]
-    fn fetch_transport_errors_force_reader_reconnect() {
+    fn fetch_errors_choose_recovery_action() {
         let cases = [
+            (
+                "offset out of range",
+                ClientError::Server { error_code: 1 },
+                FetchErrorAction::ResetToLogStart,
+            ),
+            (
+                "unknown topic or partition",
+                ClientError::Server { error_code: 3 },
+                FetchErrorAction::RefreshTopic,
+            ),
+            (
+                "not leader or follower",
+                ClientError::Server { error_code: 6 },
+                FetchErrorAction::RefreshTopic,
+            ),
+            (
+                "unknown topic id",
+                ClientError::Server { error_code: 100 },
+                FetchErrorAction::RefreshTopic,
+            ),
             (
                 "disconnected",
                 ClientError::Disconnected,
@@ -328,14 +537,22 @@ mod tests {
                 FetchErrorAction::Reconnect,
             ),
             (
-                "server",
-                ClientError::Server { error_code: 6 },
+                "other server error",
+                ClientError::Server { error_code: 7 },
                 FetchErrorAction::RetrySameConnection,
             ),
         ];
         for (_name, error, expected) in cases {
             assert2::assert!(fetch_error_action(&error) == expected);
         }
+    }
+
+    #[test]
+    fn retry_warnings_are_rate_limited() {
+        let logged: Vec<u64> = (1..=16)
+            .filter(|count| should_log_failure(*count))
+            .collect();
+        assert2::check!(logged == vec![1, 2, 4, 8, 16]);
     }
 
     #[test]
