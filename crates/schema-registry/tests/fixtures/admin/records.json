@@ -73,5 +73,10 @@
     "key": "{\"keytype\":\"SCHEMA\",\"subject\":\"i\",\"version\":5,\"magic\":1}",
     "offset": 14,
     "value": "{\"subject\":\"i\",\"version\":5,\"id\":42,\"schema\":\"{\\\"type\\\":\\\"record\\\",\\\"name\\\":\\\"C\\\",\\\"fields\\\":[]}\",\"deleted\":false}"
+  },
+  {
+    "key": "{\"keytype\":\"SCHEMA\",\"subject\":\"i\",\"version\":5,\"magic\":1}",
+    "offset": 15,
+    "value": "{\"subject\":\"i\",\"version\":5,\"id\":43,\"schema\":\"{\\\"type\\\":\\\"record\\\",\\\"name\\\":\\\"C\\\",\\\"fields\\\":[]}\",\"deleted\":false}"
   }
 ]

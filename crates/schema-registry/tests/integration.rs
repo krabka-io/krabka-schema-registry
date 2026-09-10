@@ -969,6 +969,61 @@ async fn facade_soft_then_permanent_delete_version() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn permanent_delete_keeps_versions_monotonic() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    store.set_subject_compat("av", "NONE".into()).await.unwrap();
+    let mut registrations = Vec::new();
+    for name in ["A", "B", "C"] {
+        registrations.push(
+            store
+                .register(RegisterSchema {
+                    subject: "av",
+                    ty: SchemaType::Avro,
+                    schema: &av(name),
+                    references: &[],
+                    message_type: None,
+                    import_id: None,
+                    import_version: None,
+                })
+                .await
+                .unwrap(),
+        );
+    }
+    store
+        .soft_delete_version("av", SchemaVersion(2))
+        .await
+        .unwrap();
+    store
+        .permanent_delete_version("av", SchemaVersion(2))
+        .await
+        .unwrap();
+    let fourth = store
+        .register(RegisterSchema {
+            subject: "av",
+            ty: SchemaType::Avro,
+            schema: &av("D"),
+            references: &[],
+            message_type: None,
+            import_id: None,
+            import_version: None,
+        })
+        .await
+        .unwrap();
+    assert2::assert!(fourth.version == SchemaVersion(4));
+    assert2::assert!(
+        store
+            .store
+            .read()
+            .version("av", Some(SchemaVersion(3)), false)
+            .unwrap()
+            .id
+            == registrations[2].id
+    );
+    cancel.cancel();
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn facade_readonly_blocks_writes_import_allows_explicit_id() {
     let (broker, store, cancel, _dir) = boot_registry(1).await;
     store
@@ -1290,6 +1345,93 @@ async fn rest_import_mode_registers_explicit_id() {
     let got = get_json(&app, "/subjects/imp/versions/5").await;
     assert2::assert!(&got["id"] == &serde_json::json!(42));
     assert2::assert!(&got["version"] == &serde_json::json!(5));
+
+    let fixture = std::fs::read_to_string(format!(
+        "{}/tests/fixtures/admin/rest.json",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap();
+    let fixture: serde_json::Value = serde_json::from_str(&fixture).unwrap();
+    let expected = fixture
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|case| case["op"] == "register_import_conflicting_id")
+        .unwrap();
+    let conflict = app
+        .clone()
+        .oneshot(req_post(
+            "/subjects/imp/versions",
+            &format!(r#"{{"schema":{:?},"id":42,"version":6}}"#, av("D")),
+        ))
+        .await
+        .unwrap();
+    let status = conflict.status();
+    let body = body_json(conflict).await;
+    assert2::assert!(u64::from(status.as_u16()) == expected["status"].as_u64().unwrap());
+    assert2::assert!(&body == &expected["body"]);
+    cancel.cancel();
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn permanent_subject_delete_clears_overrides() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    store
+        .set_subject_compat("gone", "NONE".into())
+        .await
+        .unwrap();
+    store
+        .register(RegisterSchema {
+            subject: "gone",
+            ty: SchemaType::Avro,
+            schema: &av("A"),
+            references: &[],
+            message_type: None,
+            import_id: None,
+            import_version: None,
+        })
+        .await
+        .unwrap();
+    store.soft_delete_subject("gone").await.unwrap();
+    store
+        .set_subject_mode("gone", "READONLY".into())
+        .await
+        .unwrap();
+    store
+        .set_subject_mode("gone", "READWRITE".into())
+        .await
+        .unwrap();
+    store.permanent_delete_subject("gone").await.unwrap();
+
+    assert2::assert!(store.store.read().subject_compat("gone").is_none());
+    assert2::assert!(store.store.read().subject_mode("gone").is_none());
+    assert2::assert!(store.store.read().effective_mode("gone") == "READWRITE");
+    store
+        .register(RegisterSchema {
+            subject: "gone",
+            ty: SchemaType::Avro,
+            schema: &av("A2"),
+            references: &[],
+            message_type: None,
+            import_id: None,
+            import_version: None,
+        })
+        .await
+        .unwrap();
+    let incompatible = store
+        .register(RegisterSchema {
+            subject: "gone",
+            ty: SchemaType::Avro,
+            schema: &av("B2"),
+            references: &[],
+            message_type: None,
+            import_id: None,
+            import_version: None,
+        })
+        .await
+        .unwrap_err();
+    assert2::assert!(incompatible.error_code() == 409);
     cancel.cancel();
     broker.shutdown().await;
 }

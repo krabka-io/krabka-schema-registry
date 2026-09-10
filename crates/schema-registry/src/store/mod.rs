@@ -69,6 +69,7 @@ pub struct StoreState {
     subjects: BTreeMap<String, Vec<VersionEntry>>,
     by_id: BTreeMap<SchemaId, RegisteredSchema>,
     by_canonical: BTreeMap<String, SchemaId>,
+    canonical_by_id: BTreeMap<SchemaId, String>,
     global_compat: Option<String>,
     default_compatibility: String,
     subject_compat: BTreeMap<String, String>,
@@ -76,6 +77,7 @@ pub struct StoreState {
     default_mode: String,
     subject_mode: BTreeMap<String, String>,
     max_id: SchemaId,
+    next_versions: BTreeMap<String, SchemaVersion>,
 }
 
 impl Default for StoreState {
@@ -92,6 +94,7 @@ impl StoreState {
             subjects: BTreeMap::new(),
             by_id: BTreeMap::new(),
             by_canonical: BTreeMap::new(),
+            canonical_by_id: BTreeMap::new(),
             global_compat: None,
             default_compatibility: compatibility,
             subject_compat: BTreeMap::new(),
@@ -99,6 +102,7 @@ impl StoreState {
             default_mode: mode,
             subject_mode: BTreeMap::new(),
             max_id: SchemaId::default(),
+            next_versions: BTreeMap::new(),
         }
     }
 
@@ -134,7 +138,8 @@ impl StoreState {
         } else {
             let id = SchemaId(self.max_id.0 + 1);
             self.max_id = id;
-            self.by_canonical.insert(key, id);
+            self.by_canonical.insert(key.clone(), id);
+            self.canonical_by_id.insert(id, key);
             self.by_id.insert(
                 id,
                 RegisteredSchema {
@@ -146,11 +151,12 @@ impl StoreState {
             );
             id
         };
-        let next_version = SchemaVersion(
-            self.subjects
-                .get(subject)
-                .map_or(1, |v| i32::try_from(v.len()).unwrap_or(i32::MAX) + 1),
-        );
+        let next_version = self
+            .next_versions
+            .get(subject)
+            .copied()
+            .unwrap_or(SchemaVersion(1));
+        self.observe_version(subject, next_version);
         self.subjects
             .entry(subject.to_string())
             .or_default()
@@ -290,14 +296,21 @@ impl StoreState {
     pub fn apply_schema(&mut self, _key: &SchemaKey, value: &SchemaValue) {
         let ty = SchemaType::from_wire(value.schema_type.as_deref());
         self.max_id = self.max_id.max(value.id);
-        self.by_id
-            .entry(value.id)
-            .or_insert_with(|| RegisteredSchema {
+        self.observe_version(&value.subject, value.version);
+        if let Some(old_key) = self.canonical_by_id.remove(&value.id)
+            && self.by_canonical.get(&old_key) == Some(&value.id)
+        {
+            self.by_canonical.remove(&old_key);
+        }
+        self.by_id.insert(
+            value.id,
+            RegisteredSchema {
                 ty,
                 schema: value.schema.clone(),
                 references: value.references.clone(),
                 message_type: value.message_type.clone(),
-            });
+            },
+        );
         if let Ok(resolved) = self.resolve_closure(&value.references)
             && let Ok(p) = format::parse(ty, &value.schema, &resolved)
         {
@@ -306,10 +319,17 @@ impl StoreState {
                 &value.references,
                 value.message_type.as_deref(),
             );
-            self.by_canonical.entry(key).or_insert(value.id);
+            if let Some(old_id) = self.by_canonical.insert(key.clone(), value.id)
+                && old_id != value.id
+                && self.canonical_by_id.get(&old_id) == Some(&key)
+            {
+                self.canonical_by_id.remove(&old_id);
+            }
+            self.canonical_by_id.insert(value.id, key);
         }
         let entry = self.subjects.entry(value.subject.clone()).or_default();
         if let Some(e) = entry.iter_mut().find(|v| v.version == value.version) {
+            e.id = value.id;
             e.deleted = value.deleted;
         } else {
             entry.push(VersionEntry {
@@ -319,6 +339,61 @@ impl StoreState {
             });
             entry.sort_by_key(|v| v.version);
         }
+    }
+
+    fn observe_version(&mut self, subject: &str, version: SchemaVersion) {
+        let next = SchemaVersion(version.0.saturating_add(1));
+        self.next_versions
+            .entry(subject.to_string())
+            .and_modify(|current| *current = (*current).max(next))
+            .or_insert(next);
+    }
+
+    pub fn observe_next_version(&mut self, subject: &str, next: SchemaVersion) {
+        self.next_versions
+            .entry(subject.to_string())
+            .and_modify(|current| *current = (*current).max(next))
+            .or_insert(next);
+    }
+
+    #[must_use]
+    pub fn next_version(&self, subject: &str) -> SchemaVersion {
+        self.next_versions
+            .get(subject)
+            .copied()
+            .unwrap_or(SchemaVersion(1))
+    }
+
+    /// Whether `id` is already bound to a different canonical schema identity.
+    /// # Errors
+    /// Returns an error if stored references can no longer be resolved.
+    pub fn schema_id_conflicts(
+        &self,
+        id: SchemaId,
+        ty: SchemaType,
+        schema: &str,
+        references: &[SchemaReference],
+        message_type: Option<&str>,
+    ) -> Result<bool, SrError> {
+        let Some(existing) = self.by_id.get(&id) else {
+            return Ok(false);
+        };
+        if existing.ty != ty {
+            return Ok(true);
+        }
+        let existing_resolved = self.resolve_closure(&existing.references)?;
+        let existing_key = Self::dedup_key(
+            &format::parse(existing.ty, &existing.schema, &existing_resolved)?.canonical_form(),
+            &existing.references,
+            existing.message_type.as_deref(),
+        );
+        let candidate_resolved = self.resolve_closure(references)?;
+        let candidate_key = Self::dedup_key(
+            &format::parse(ty, schema, &candidate_resolved)?.canonical_form(),
+            references,
+            message_type,
+        );
+        Ok(existing_key != candidate_key)
     }
 
     fn find_under_subject_canonical(
@@ -527,6 +602,7 @@ impl StoreState {
         subject: &str,
         version: SchemaVersion,
     ) -> Option<SchemaVersion> {
+        self.observe_version(subject, version);
         let vs = self.subjects.get_mut(subject)?;
         let before = vs.len();
         vs.retain(|v| v.version != version);
@@ -790,6 +866,49 @@ mod tests {
             .unwrap();
         assert2::assert!(r.id == sid(1));
         assert2::assert!(r.version == sv(1));
+    }
+
+    #[test]
+    fn replay_rebinds_version_and_id() {
+        let mut s = StoreState::default();
+        apply_live(&mut s, "av", 1, 1, &av("A"));
+        apply_live(&mut s, "av", 1, 2, &av("B"));
+        assert2::assert!(s.version("av", Some(sv(1)), false).unwrap().id == sid(2));
+        assert2::assert!(s.schema_by_id(sid(2), false).unwrap().1 == av("B"));
+        assert2::assert!(s.schema_by_id(sid(1), true).is_none());
+        assert2::assert!(
+            s.schema_id_conflicts(sid(1), SchemaType::Avro, &av("C"), &[], None)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn import_identity_is_canonical() {
+        let mut s = StoreState::default();
+        apply_live(&mut s, "av", 1, 1, &av("A"));
+        let spaced = r#"{ "type": "record", "name": "A", "fields": [] }"#;
+        assert2::assert!(
+            !s.schema_id_conflicts(sid(1), SchemaType::Avro, spaced, &[], None)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn tombstones_preserve_version_high_water() {
+        let mut s = StoreState::default();
+        apply_live(&mut s, "av", 3, 3, &av("C"));
+        s.permanent_delete_version("av", sv(3));
+        let registered = s
+            .register("av", SchemaType::Avro, &av("D"), &[], None)
+            .unwrap();
+        assert2::assert!(registered.version == sv(4));
+
+        let mut compacted = StoreState::default();
+        compacted.permanent_delete_version("av", sv(3));
+        let registered = compacted
+            .register("av", SchemaType::Avro, &av("D"), &[], None)
+            .unwrap();
+        assert2::assert!(registered.version == sv(4));
     }
 
     #[test]

@@ -44,6 +44,8 @@ pub enum SrError {
     /// A write was attempted on a subject/registry in `READONLY` mode.
     #[error("Subject '{0}' is in read-only mode.")]
     OperationNotPermitted(String),
+    #[error("Overwrite new schema with id {} is not permitted.", .0.0)]
+    SchemaIdConflict(crate::ids::SchemaId),
     /// Permanent subject delete attempted before a soft delete.
     #[error("Subject '{0}' was not deleted first before being permanently deleted.")]
     SubjectNotSoftDeleted(String),
@@ -89,7 +91,7 @@ impl SrError {
             Self::InvalidCompatibilityLevel(_) => 42203,
             Self::Backend(_) => 50001,
             Self::Incompatible(_) => 409,
-            Self::OperationNotPermitted(_) => 42205,
+            Self::OperationNotPermitted(_) | Self::SchemaIdConflict(_) => 42205,
             Self::SubjectNotSoftDeleted(_) => 40405,
             Self::VersionNotSoftDeleted(..) => 40407,
             Self::InvalidMode(_) => 42204,
@@ -117,6 +119,7 @@ impl SrError {
             | Self::InvalidVersion(_)
             | Self::InvalidCompatibilityLevel(_)
             | Self::OperationNotPermitted(_)
+            | Self::SchemaIdConflict(_)
             | Self::InvalidMode(_)
             | Self::ReferenceNotFound(_)
             | Self::ReferencedByOthers(_) => StatusCode::UNPROCESSABLE_ENTITY,
