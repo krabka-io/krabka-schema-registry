@@ -3,7 +3,7 @@
 //! The local type gives its schema with `schemars`. Payloads are UTF-8 JSON.
 //! The serde can also validate them against the writer schema.
 
-use std::{marker::PhantomData, sync::Arc};
+use std::{collections::HashMap, marker::PhantomData, sync::Arc};
 
 use bytes::Bytes;
 use schemars::JsonSchema;
@@ -13,6 +13,7 @@ use crate::{
     cache::SchemaCache,
     error::SchemaSerdeError,
     format::{Binding, SchemaDeserializer, SchemaSerializer, SchemaSubject},
+    registry::model::SchemaReference,
     subject::{Role, SchemaKind},
     wire,
 };
@@ -50,6 +51,7 @@ impl<T: JsonSchema> JsonSerde<T> {
                 role,
                 kind: SchemaKind::Json,
                 schema: schema_text,
+                references: Vec::new(),
                 message_type: None,
             },
             validate,
@@ -68,6 +70,13 @@ impl<T: JsonSchema> JsonSerde<T> {
     /// A JSON serde for record **keys**: `<topic>-key`.
     pub fn key(cache: &Arc<SchemaCache>, validate: bool) -> Self {
         Self::make(cache, Role::Key, validate)
+    }
+
+    /// Attach the references sent with register and lookup requests.
+    #[must_use]
+    pub fn with_references(mut self, references: Vec<SchemaReference>) -> Self {
+        self.binding.references = references;
+        self
     }
 }
 
@@ -108,13 +117,24 @@ where
     fn deserialize(&self, _topic: &str, bytes: &[u8]) -> Result<T, SchemaSerdeError> {
         let (id, body) = wire::decode(bytes)?;
         if self.validate {
-            let writer_text = self.binding.cache.writer_schema(id)?;
-            let writer: serde_json::Value = serde_json::from_str(&writer_text)
+            let writer_schema = self.binding.cache.writer_schema_with_references(id)?;
+            let writer: serde_json::Value = serde_json::from_str(&writer_schema.schema)
                 .map_err(|e| SchemaSerdeError::Schema(e.to_string()))?;
             let instance: serde_json::Value = serde_json::from_slice(body)
                 .map_err(|e| SchemaSerdeError::Deserialize(e.to_string()))?;
             // jsonschema: validator_for(&Value) -> Result<Validator, ValidationError<'static>>
-            let validator = jsonschema::validator_for(&writer)
+            let references = writer_schema
+                .references
+                .into_iter()
+                .map(|(name, source)| {
+                    serde_json::from_str(&source)
+                        .map(|schema| (name, schema))
+                        .map_err(|error| SchemaSerdeError::Schema(error.to_string()))
+                })
+                .collect::<Result<HashMap<_, _>, _>>()?;
+            let validator = jsonschema::options()
+                .with_retriever(CachedRetriever(references))
+                .build(&writer)
                 .map_err(|e| SchemaSerdeError::Schema(e.to_string()))?;
             // Validator::validate(&self, instance) -> Result<(), ValidationError<'i>>
             validator.validate(&instance).map_err(|e| {
@@ -125,8 +145,24 @@ where
     }
 }
 
+#[derive(Debug)]
+struct CachedRetriever(HashMap<String, serde_json::Value>);
+
+impl jsonschema::Retrieve for CachedRetriever {
+    fn retrieve(
+        &self,
+        uri: &jsonschema::Uri<String>,
+    ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+        self.0.get(uri.as_str()).cloned().ok_or_else(|| {
+            format!("JSON Schema reference {uri} is not present in the registry cache").into()
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use assert2::check;
     use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
@@ -160,5 +196,28 @@ mod tests {
         check!(framed[0] == 0x00);
         let back: Order = serde.deserialize("orders", &framed).unwrap();
         check!(back == order);
+    }
+
+    #[test]
+    fn validates_external_reference_from_writer_cache() {
+        let cache = SchemaCache::new(RegistryClient::new("http://unused"), CacheConfig::default());
+        let serde = JsonSerde::<Order>::value(&cache, true);
+        cache.seed_writer_schema_with_references(
+            6,
+            r#"{"$ref":"https://schemas.example/order.json"}"#,
+            HashMap::from([(
+                "https://schemas.example/order.json".into(),
+                r#"{"type":"object","required":["id","total"],"properties":{"id":{"type":"string"},"total":{"type":"number"}}}"#.into(),
+            )]),
+        );
+        let frame = wire::encode(6, br#"{"id":"o-2","total":4.5}"#);
+        let decoded = serde.deserialize("orders", &frame).unwrap();
+        check!(
+            decoded
+                == Order {
+                    id: "o-2".into(),
+                    total: 4.5
+                }
+        );
     }
 }

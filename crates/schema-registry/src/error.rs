@@ -37,6 +37,8 @@ pub enum SrError {
     InvalidCompatibilityLevel(String),
     #[error("Error in the backend data store: {0}")]
     Backend(String),
+    #[error("Operation timed out")]
+    OperationTimedOut,
     /// Schema incompatible with one or more prior versions under the subject.
     /// The strings are best-effort reasons in Avro's wording, not Confluent's.
     #[error("Schema being registered is incompatible with an earlier schema; details: {0:?}")]
@@ -90,6 +92,7 @@ impl SrError {
             Self::InvalidVersion(_) => 42202,
             Self::InvalidCompatibilityLevel(_) => 42203,
             Self::Backend(_) => 50001,
+            Self::OperationTimedOut => 50002,
             Self::Incompatible(_) => 409,
             Self::OperationNotPermitted(_) | Self::SchemaIdConflict(_) => 42205,
             Self::SubjectNotSoftDeleted(_) => 40405,
@@ -123,9 +126,10 @@ impl SrError {
             | Self::InvalidMode(_)
             | Self::ReferenceNotFound(_)
             | Self::ReferencedByOthers(_) => StatusCode::UNPROCESSABLE_ENTITY,
-            Self::Backend(_) | Self::ForwardFailed | Self::UnknownLeader(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            Self::Backend(_)
+            | Self::OperationTimedOut
+            | Self::ForwardFailed
+            | Self::UnknownLeader(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Incompatible(_) => StatusCode::CONFLICT,
         }
     }

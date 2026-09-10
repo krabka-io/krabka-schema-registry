@@ -6,7 +6,7 @@
 use std::{marker::PhantomData, sync::Arc};
 
 use apache_avro::{
-    AvroSchema, from_avro_datum, from_value, schema::Schema, to_avro_datum, to_value,
+    AvroSchema, from_avro_datum_schemata, from_value, schema::Schema, to_avro_datum, to_value,
 };
 use bytes::Bytes;
 use serde::{Serialize, de::DeserializeOwned};
@@ -15,6 +15,7 @@ use crate::{
     cache::SchemaCache,
     error::SchemaSerdeError,
     format::{Binding, SchemaDeserializer, SchemaSerializer, SchemaSubject},
+    registry::model::SchemaReference,
     subject::{Role, SchemaKind},
     wire,
 };
@@ -51,6 +52,7 @@ impl<T: AvroSchema> AvroSerde<T> {
                 role,
                 kind: SchemaKind::Avro,
                 schema: reader_schema.canonical_form(),
+                references: Vec::new(),
                 message_type: None,
             },
             reader_schema,
@@ -66,6 +68,13 @@ impl<T: AvroSchema> AvroSerde<T> {
     /// An Avro serde for record **keys**: `<topic>-key`.
     pub fn key(cache: &Arc<SchemaCache>) -> Self {
         Self::make(cache, Role::Key)
+    }
+
+    /// Attach the references sent with register and lookup requests.
+    #[must_use]
+    pub fn with_references(mut self, references: Vec<SchemaReference>) -> Self {
+        self.binding.references = references;
+        self
     }
 }
 
@@ -105,18 +114,35 @@ where
 {
     fn deserialize(&self, _topic: &str, bytes: &[u8]) -> Result<T, SchemaSerdeError> {
         let (id, body) = wire::decode(bytes)?;
-        let writer_text = self.binding.cache.writer_schema(id)?;
-        let writer_schema =
-            Schema::parse_str(&writer_text).map_err(|e| SchemaSerdeError::Schema(e.to_string()))?;
+        let writer = self.binding.cache.writer_schema_with_references(id)?;
+        let mut sources: Vec<&str> = writer
+            .reference_order
+            .iter()
+            .filter_map(|name| writer.references.get(name).map(String::as_str))
+            .collect();
+        sources.push(&writer.schema);
+        let schemas =
+            Schema::parse_list(&sources).map_err(|e| SchemaSerdeError::Schema(e.to_string()))?;
+        let writer_schema = schemas
+            .last()
+            .ok_or_else(|| SchemaSerdeError::Schema("empty Avro schema set".into()))?;
+        let writer_schemata = schemas.iter().collect();
         let mut cursor = body;
-        let value = from_avro_datum(&writer_schema, &mut cursor, Some(&self.reader_schema))
-            .map_err(|e| SchemaSerdeError::Deserialize(e.to_string()))?;
+        let value = from_avro_datum_schemata(
+            writer_schema,
+            writer_schemata,
+            &mut cursor,
+            Some(&self.reader_schema),
+        )
+        .map_err(|e| SchemaSerdeError::Deserialize(e.to_string()))?;
         from_value::<T>(&value).map_err(|e| SchemaSerdeError::Deserialize(e.to_string()))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use apache_avro::AvroSchema;
     use assert2::check;
     use serde::{Deserialize, Serialize};
@@ -131,6 +157,31 @@ mod tests {
     struct Order {
         id: String,
         total: f64,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, AvroSchema)]
+    struct Money {
+        cents: i64,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, AvroSchema)]
+    struct Invoice {
+        total: Money,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, AvroSchema)]
+    struct A {
+        x: String,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, AvroSchema)]
+    struct B {
+        a: A,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, AvroSchema)]
+    struct C {
+        b: B,
     }
 
     #[test]
@@ -149,5 +200,57 @@ mod tests {
         check!((&framed[..5]) == [0x00, 0x00, 0x00, 0x00, 0x0b]);
         let back: Order = serde.deserialize("orders", &framed).unwrap();
         check!(back == order);
+    }
+
+    #[test]
+    fn decodes_writer_schema_with_cached_reference() {
+        let cache = SchemaCache::new(RegistryClient::new("http://unused"), CacheConfig::default());
+        let serde = AvroSerde::<Invoice>::value(&cache);
+        let money = r#"{"type":"record","name":"Money","fields":[{"name":"cents","type":"long"}]}"#;
+        let invoice =
+            r#"{"type":"record","name":"Invoice","fields":[{"name":"total","type":"Money"}]}"#;
+        cache.seed_writer_schema_with_references(
+            12,
+            invoice,
+            HashMap::from([("money.avsc".into(), money.into())]),
+        );
+        // One nested record containing long 19: records add no bytes and Avro
+        // zig-zag encodes 19 as 38.
+        let body = [38];
+        let decoded = serde
+            .deserialize("invoices", &wire::encode(12, &body))
+            .unwrap();
+        check!(
+            decoded
+                == Invoice {
+                    total: Money { cents: 19 }
+                }
+        );
+    }
+
+    #[test]
+    fn decodes_transitive_references_in_dependency_order() {
+        let cache = SchemaCache::new(RegistryClient::new("http://unused"), CacheConfig::default());
+        let serde = AvroSerde::<C>::value(&cache);
+        let a = r#"{"type":"record","name":"A","fields":[{"name":"x","type":"string"}]}"#;
+        let b = r#"{"type":"record","name":"B","fields":[{"name":"a","type":"A"}]}"#;
+        let c = r#"{"type":"record","name":"C","fields":[{"name":"b","type":"B"}]}"#;
+        cache.seed_writer_schema_with_ordered_references(
+            13,
+            c,
+            [("a.avsc".into(), a.into()), ("b.avsc".into(), b.into())],
+        );
+
+        let decoded = serde
+            .deserialize("orders", &wire::encode(13, &[4, b'o', b'k']))
+            .unwrap();
+        check!(
+            decoded
+                == C {
+                    b: B {
+                        a: A { x: "ok".into() }
+                    }
+                }
+        );
     }
 }

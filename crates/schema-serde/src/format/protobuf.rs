@@ -3,16 +3,24 @@
 //! The local message gives its descriptor with `ReflectMessage`. The registered
 //! schema is the normalized `.proto` text of its file descriptor.
 
-use std::{marker::PhantomData, sync::Arc};
+use std::{fmt::Write as _, marker::PhantomData, sync::Arc};
 
 use bytes::Bytes;
 use prost::Message;
-use prost_reflect::ReflectMessage;
+use prost_reflect::{
+    MessageDescriptor, ReflectMessage,
+    prost_types::{
+        DescriptorProto, EnumDescriptorProto, FieldDescriptorProto, FileDescriptorProto,
+        ServiceDescriptorProto,
+        field_descriptor_proto::{Label, Type as FieldType},
+    },
+};
 
 use crate::{
     cache::SchemaCache,
     error::SchemaSerdeError,
     format::{Binding, SchemaDeserializer, SchemaSerializer, SchemaSubject},
+    registry::model::SchemaReference,
     subject::{Role, SchemaKind},
     wire,
 };
@@ -43,13 +51,15 @@ impl<T: ReflectMessage + Default> ProtobufSerde<T> {
     fn make(cache: &Arc<SchemaCache>, role: Role) -> Self {
         let descriptor = T::default().descriptor();
         let proto_text = proto_source(&descriptor);
-        let message_index = message_index(&descriptor);
+        let message_index = message_index(&descriptor)
+            .expect("a message descriptor is reachable from its parent file");
         Self {
             binding: Binding {
                 cache: Arc::clone(cache),
                 role,
                 kind: SchemaKind::Protobuf,
                 schema: proto_text,
+                references: Vec::new(),
                 message_type: Some(descriptor.full_name().to_string()),
             },
             message_index,
@@ -65,6 +75,13 @@ impl<T: ReflectMessage + Default> ProtobufSerde<T> {
     /// A Protobuf serde for record **keys**: `<topic>-key`.
     pub fn key(cache: &Arc<SchemaCache>) -> Self {
         Self::make(cache, Role::Key)
+    }
+
+    /// Attach the references sent with register and lookup requests.
+    #[must_use]
+    pub fn with_references(mut self, references: Vec<SchemaReference>) -> Self {
+        self.binding.references = references;
+        self
     }
 }
 
@@ -118,94 +135,315 @@ where
 /// Render the file descriptor of `descriptor`'s parent file to `.proto` text.
 fn proto_source(descriptor: &prost_reflect::MessageDescriptor) -> String {
     let file = descriptor.parent_file();
-    print::file_to_proto(file.file_descriptor_proto())
+    normalize(file.file_descriptor_proto())
 }
 
 /// Compute the Confluent message-index path of `descriptor` within its file.
-fn message_index(descriptor: &prost_reflect::MessageDescriptor) -> Vec<i32> {
+///
+/// # Errors
+///
+/// Returns a schema error if the descriptor cannot be reached from its parent
+/// file's top-level message list.
+pub fn message_index(descriptor: &MessageDescriptor) -> Result<Vec<i32>, SchemaSerdeError> {
     let file = descriptor.parent_file();
-    let target = descriptor.full_name();
-    for (i, m) in file.messages().enumerate() {
-        if m.full_name() == target {
-            return vec![i32::try_from(i).expect("Protobuf message index must fit in i32")];
-        }
-    }
-    vec![0]
+    message_index_in(file.messages(), descriptor.full_name()).ok_or_else(|| {
+        SchemaSerdeError::Schema(format!(
+            "protobuf message {} is not reachable from its parent file",
+            descriptor.full_name()
+        ))
+    })
 }
 
-/// Minimal `.proto` text renderer.
-///
-/// The renderer stays narrow because the registry stores the text for dedup.
-/// Full normalization parity is a verify-against-cp item.
-pub(crate) mod print {
-    use std::fmt::Write as _;
+fn message_index_in(
+    messages: impl Iterator<Item = MessageDescriptor>,
+    target: &str,
+) -> Option<Vec<i32>> {
+    for (index, message) in messages.enumerate() {
+        let index = i32::try_from(index).ok()?;
+        if message.full_name() == target {
+            return Some(vec![index]);
+        }
+        if let Some(mut child) = message_index_in(message.child_messages(), target) {
+            child.insert(0, index);
+            return Some(child);
+        }
+    }
+    None
+}
 
-    use prost_reflect::prost_types::{
-        FieldDescriptorProto, FileDescriptorProto, field_descriptor_proto::Type,
+/// Return Confluent-compatible normalized `.proto` text.
+#[must_use]
+pub fn normalize(file: &FileDescriptorProto) -> String {
+    let mut out = String::new();
+    let syntax = file.syntax.as_deref().unwrap_or("proto3");
+    let _ = writeln!(out, "syntax = \"{syntax}\";");
+    if let Some(package) = file
+        .package
+        .as_deref()
+        .filter(|package| !package.is_empty())
+    {
+        let _ = writeln!(out, "package {package};");
+    }
+    for dependency in &file.dependency {
+        out.push('\n');
+        let _ = writeln!(out, "import \"{dependency}\";");
+    }
+    let package = file.package.as_deref().unwrap_or("");
+    for enumeration in &file.enum_type {
+        out.push('\n');
+        write_enum(&mut out, enumeration, 0);
+    }
+    for message in &file.message_type {
+        out.push('\n');
+        write_message(&mut out, message, 0, package, package, syntax);
+    }
+    for service in &file.service {
+        out.push('\n');
+        write_service(&mut out, service, package);
+    }
+    out
+}
+
+fn write_message(
+    out: &mut String,
+    message: &DescriptorProto,
+    depth: usize,
+    package: &str,
+    parent_name: &str,
+    syntax: &str,
+) {
+    let name = message.name.as_deref().unwrap_or("Unknown");
+    let full_name = if parent_name.is_empty() {
+        name.to_string()
+    } else {
+        format!("{parent_name}.{name}")
     };
-
-    pub fn file_to_proto(file: &FileDescriptorProto) -> String {
-        let mut out = String::new();
-        out.push_str("syntax = \"proto3\";\n");
-        if let Some(pkg) = file.package.as_deref()
-            && !pkg.is_empty()
-        {
-            let _ = writeln!(out, "package {pkg};");
-        }
-        for msg in &file.message_type {
-            let msg_name = msg.name.as_deref().unwrap_or("");
-            let _ = write!(out, "\nmessage {msg_name} {{\n");
-            for field in &msg.field {
-                let field_name = field.name.as_deref().unwrap_or("");
-                let field_num = field.number.unwrap_or(0);
-                let _ = writeln!(out, "  {} {field_name} = {field_num};", field_type(field));
-            }
-            out.push_str("}\n");
-        }
-        out
+    let indent = "  ".repeat(depth);
+    let _ = writeln!(out, "{indent}message {} {{", name);
+    write_reserved(out, message, depth + 1);
+    for enumeration in &message.enum_type {
+        write_enum(out, enumeration, depth + 1);
     }
-
-    /// Render a field's `.proto` type token.
-    ///
-    /// For a message or an enum, this function returns the `type_name` with the
-    /// leading dot stripped. For a scalar, it returns the proto3 keyword for
-    /// the `type`. Scalar fields carry an empty `type_name` and a populated
-    /// `type`. A test of `type_name` alone would emit no type at all, and the
-    /// `.proto` text would not parse.
-    fn field_type(field: &FieldDescriptorProto) -> String {
-        if let Some(name) = field.type_name.as_deref()
-            && !name.is_empty()
-        {
-            return name.trim_start_matches('.').to_string();
+    for field in message
+        .field
+        .iter()
+        .filter(|field| field.oneof_index.is_none())
+    {
+        write_field(out, field, message, &full_name, depth + 1, package, syntax);
+    }
+    for (index, oneof) in message.oneof_decl.iter().enumerate() {
+        let fields: Vec<_> = message
+            .field
+            .iter()
+            .filter(|field| field.oneof_index == i32::try_from(index).ok())
+            .collect();
+        if fields.len() == 1 && fields[0].proto3_optional.unwrap_or(false) {
+            write_field(
+                out,
+                fields[0],
+                message,
+                &full_name,
+                depth + 1,
+                package,
+                syntax,
+            );
+            continue;
         }
-        let scalar = match field.r#type.and_then(|t| Type::try_from(t).ok()) {
-            Some(Type::Double) => "double",
-            Some(Type::Float) => "float",
-            Some(Type::Int64) => "int64",
-            Some(Type::Uint64) => "uint64",
-            Some(Type::Int32) => "int32",
-            Some(Type::Fixed64) => "fixed64",
-            Some(Type::Fixed32) => "fixed32",
-            Some(Type::Bool) => "bool",
-            Some(Type::String) => "string",
-            Some(Type::Bytes) => "bytes",
-            Some(Type::Uint32) => "uint32",
-            Some(Type::Sfixed32) => "sfixed32",
-            Some(Type::Sfixed64) => "sfixed64",
-            Some(Type::Sint32) => "sint32",
-            Some(Type::Sint64) => "sint64",
+        let child_indent = "  ".repeat(depth + 1);
+        let _ = writeln!(
+            out,
+            "{child_indent}oneof {} {{",
+            oneof.name.as_deref().unwrap_or("unknown")
+        );
+        for field in fields {
+            write_field(out, field, message, &full_name, depth + 2, package, syntax);
+        }
+        let _ = writeln!(out, "{child_indent}}}");
+    }
+    for nested in message.nested_type.iter().filter(|nested| {
+        !nested
+            .options
+            .as_ref()
+            .is_some_and(prost_reflect::prost_types::MessageOptions::map_entry)
+    }) {
+        write_message(out, nested, depth + 1, package, &full_name, syntax);
+    }
+    let _ = writeln!(out, "{indent}}}");
+}
+
+fn write_reserved(out: &mut String, message: &DescriptorProto, depth: usize) {
+    let indent = "  ".repeat(depth);
+    for range in &message.reserved_range {
+        let start = range.start.unwrap_or_default();
+        let end = range.end.unwrap_or(start + 1) - 1;
+        if start == end {
+            let _ = writeln!(out, "{indent}reserved {start};");
+        } else {
+            let _ = writeln!(out, "{indent}reserved {start} to {end};");
+        }
+    }
+    if !message.reserved_name.is_empty() {
+        let names = message
+            .reserved_name
+            .iter()
+            .map(|name| format!("\"{name}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(out, "{indent}reserved {names};");
+    }
+}
+
+fn write_enum(out: &mut String, enumeration: &EnumDescriptorProto, depth: usize) {
+    let indent = "  ".repeat(depth);
+    let _ = writeln!(
+        out,
+        "{indent}enum {} {{",
+        enumeration.name.as_deref().unwrap_or("Unknown")
+    );
+    for value in &enumeration.value {
+        let _ = writeln!(
+            out,
+            "{indent}  {} = {};",
+            value.name.as_deref().unwrap_or("UNKNOWN"),
+            value.number.unwrap_or_default()
+        );
+    }
+    let _ = writeln!(out, "{indent}}}");
+}
+
+fn write_field(
+    out: &mut String,
+    field: &FieldDescriptorProto,
+    parent: &DescriptorProto,
+    parent_name: &str,
+    depth: usize,
+    package: &str,
+    syntax: &str,
+) {
+    let indent = "  ".repeat(depth);
+    let label = if field.proto3_optional.unwrap_or(false) {
+        "optional "
+    } else if map_entry(parent, parent_name, field).is_some() {
+        ""
+    } else {
+        match (syntax, field.label()) {
+            (_, Label::Repeated) => "repeated ",
+            ("proto2", Label::Required) => "required ",
+            ("proto2", Label::Optional) => "optional ",
             _ => "",
-        };
-        scalar.to_string()
+        }
+    };
+    let ty = map_entry(parent, parent_name, field).map_or_else(
+        || proto_type_name(field, package),
+        |entry| {
+            let key = entry.field.first().map_or_else(
+                || "unknown".to_string(),
+                |field| proto_type_name(field, package),
+            );
+            let value = entry.field.get(1).map_or_else(
+                || "unknown".to_string(),
+                |field| proto_type_name(field, package),
+            );
+            format!("map<{key}, {value}>")
+        },
+    );
+    let _ = writeln!(
+        out,
+        "{indent}{label}{ty} {} = {};",
+        field.name.as_deref().unwrap_or("unknown"),
+        field.number.unwrap_or_default()
+    );
+}
+
+fn map_entry<'a>(
+    parent: &'a DescriptorProto,
+    parent_name: &str,
+    field: &FieldDescriptorProto,
+) -> Option<&'a DescriptorProto> {
+    let field_type = field.type_name.as_deref()?.trim_start_matches('.');
+    parent.nested_type.iter().find(|nested| {
+        nested
+            .name
+            .as_deref()
+            .is_some_and(|name| field_type == name || field_type == format!("{parent_name}.{name}"))
+            && nested
+                .options
+                .as_ref()
+                .is_some_and(prost_reflect::prost_types::MessageOptions::map_entry)
+    })
+}
+
+fn proto_type_name(field: &FieldDescriptorProto, package: &str) -> String {
+    if let Some(name) = field.type_name.as_deref().filter(|name| !name.is_empty()) {
+        return proto_ref_name(name, package);
     }
+    match field.r#type() {
+        FieldType::Double => "double",
+        FieldType::Float => "float",
+        FieldType::Int64 => "int64",
+        FieldType::Uint64 => "uint64",
+        FieldType::Int32 => "int32",
+        FieldType::Fixed64 => "fixed64",
+        FieldType::Fixed32 => "fixed32",
+        FieldType::Bool => "bool",
+        FieldType::String => "string",
+        FieldType::Bytes => "bytes",
+        FieldType::Uint32 => "uint32",
+        FieldType::Sfixed32 => "sfixed32",
+        FieldType::Sfixed64 => "sfixed64",
+        FieldType::Sint32 => "sint32",
+        FieldType::Sint64 => "sint64",
+        FieldType::Group | FieldType::Message | FieldType::Enum => "unknown",
+    }
+    .to_string()
+}
+
+fn proto_ref_name(name: &str, package: &str) -> String {
+    if !package.is_empty()
+        && let Some(local) = name.strip_prefix(&format!(".{package}."))
+    {
+        return local.to_string();
+    }
+    name.trim_start_matches('.').to_string()
+}
+
+fn write_service(out: &mut String, service: &ServiceDescriptorProto, package: &str) {
+    let _ = writeln!(
+        out,
+        "service {} {{",
+        service.name.as_deref().unwrap_or("Unknown")
+    );
+    for method in &service.method {
+        let input_prefix = if method.client_streaming.unwrap_or(false) {
+            "stream "
+        } else {
+            ""
+        };
+        let output_prefix = if method.server_streaming.unwrap_or(false) {
+            "stream "
+        } else {
+            ""
+        };
+        let input = proto_ref_name(method.input_type.as_deref().unwrap_or("Unknown"), package);
+        let output = proto_ref_name(method.output_type.as_deref().unwrap_or("Unknown"), package);
+        let _ = writeln!(
+            out,
+            "  rpc {} ({input_prefix}{input}) returns ({output_prefix}{output});",
+            method.name.as_deref().unwrap_or("Unknown")
+        );
+    }
+    let _ = writeln!(out, "}}");
 }
 
 #[cfg(test)]
 mod tests {
     use assert2::check;
-    use prost_reflect::prost_types::{DescriptorProto, FieldDescriptorProto, FileDescriptorProto};
+    use prost_reflect::prost_types::{
+        DescriptorProto, FieldDescriptorProto, FileDescriptorProto, MessageOptions,
+        field_descriptor_proto::{Label, Type},
+    };
 
-    use super::{ProtobufSerde, print::file_to_proto};
+    use super::{ProtobufSerde, message_index, message_index_in, normalize};
     use crate::format::SchemaDeserializer;
 
     #[test]
@@ -224,7 +462,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let text = file_to_proto(&file);
+        let text = normalize(&file);
         check!(
             (
                 text.contains("package demo;"),
@@ -232,6 +470,89 @@ mod tests {
                 text.contains("id = 1;"),
             ) == (true, true, true)
         );
+    }
+
+    #[test]
+    fn imported_simple_name_does_not_match_local_map_entry() {
+        let map_entry = DescriptorProto {
+            name: Some("ItemsEntry".into()),
+            field: vec![
+                FieldDescriptorProto {
+                    name: Some("key".into()),
+                    number: Some(1),
+                    r#type: Some(Type::String as i32),
+                    ..Default::default()
+                },
+                FieldDescriptorProto {
+                    name: Some("value".into()),
+                    number: Some(2),
+                    r#type: Some(Type::Int32 as i32),
+                    ..Default::default()
+                },
+            ],
+            options: Some(MessageOptions {
+                map_entry: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let file = FileDescriptorProto {
+            package: Some("local".into()),
+            message_type: vec![DescriptorProto {
+                name: Some("Container".into()),
+                field: vec![FieldDescriptorProto {
+                    name: Some("items".into()),
+                    number: Some(1),
+                    label: Some(Label::Repeated as i32),
+                    r#type: Some(Type::Message as i32),
+                    type_name: Some(".other.ItemsEntry".into()),
+                    ..Default::default()
+                }],
+                nested_type: vec![map_entry],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let text = normalize(&file);
+        check!(text.contains("repeated other.ItemsEntry items = 1;"));
+        check!(!text.contains("map<string, int32> items = 1;"));
+    }
+
+    #[test]
+    fn complex_descriptor_round_trips_and_nested_index_is_exact() {
+        let source = r#"
+            syntax = "proto3";
+            package demo;
+            message Outer {
+              enum Kind { KIND_UNSPECIFIED = 0; KIND_READY = 1; }
+              message Inner { string name = 1; }
+              repeated Inner items = 1;
+              Kind kind = 2;
+              oneof choice { string text = 3; int64 number = 4; }
+              map<string, int32> counts = 5;
+            }
+        "#;
+        let file = protox_parse::parse("complex.proto", source).unwrap();
+        let rendered = normalize(&file);
+        check!(
+            protox_parse::parse("complex.proto", &rendered).is_ok(),
+            "{rendered}"
+        );
+        check!(rendered.contains("repeated Inner items = 1;"));
+        check!(rendered.contains("oneof choice"));
+        check!(
+            rendered.contains("map<string, int32> counts = 5;"),
+            "{rendered}"
+        );
+
+        let pool = prost_reflect::DescriptorPool::from_file_descriptor_set(
+            prost_reflect::prost_types::FileDescriptorSet { file: vec![file] },
+        )
+        .unwrap();
+        let inner = pool.get_message_by_name("demo.Outer.Inner").unwrap();
+        check!(message_index(&inner).unwrap() == vec![0, 0]);
+        check!(message_index_in(inner.parent_file().messages(), "demo.Missing").is_none());
     }
 
     #[test]
@@ -284,11 +605,11 @@ mod tests {
             }],
             ..Default::default()
         };
-        let text = file_to_proto(&file);
+        let text = normalize(&file);
         for (i, (_, kw)) in scalars.iter().enumerate() {
             check!(text.contains(&format!("{kw} f_{kw} = {};", i + 1)));
         }
-        check!(text.contains("demo.Other nested = 100;"));
+        check!(text.contains("Other nested = 100;"));
     }
 
     #[test]

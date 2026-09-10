@@ -4,16 +4,22 @@
 use bytes::Bytes;
 use krabka_client_core::ClientSecurity;
 use krabka_client_producer::{Acks, ConsumerGroupMetadata, Producer, ProducerRecord};
+use krabka_units::convert::TimeExt as _;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::config::RegistryConfig;
+
+#[derive(Debug, thiserror::Error)]
+#[error("schema-store operation timed out")]
+pub struct StoreTimeout;
 
 pub struct SchemaWriter {
     producer: Producer,
     fenced_producer: Producer,
     fenced_state: Mutex<FencedState>,
     topic: String,
+    timeout: std::time::Duration,
 }
 
 #[derive(Default)]
@@ -57,6 +63,7 @@ impl SchemaWriter {
             fenced_producer,
             fenced_state: Mutex::new(FencedState::default()),
             topic: cfg.schemas_topic.clone(),
+            timeout: cfg.runtime.store_timeout.to_std(),
         })
     }
 
@@ -70,10 +77,14 @@ impl SchemaWriter {
         value: Vec<u8>,
         group: Option<&ConsumerGroupMetadata>,
     ) -> anyhow::Result<i64> {
-        if let Some(group) = group {
-            return self.produce_fenced(key, Some(value), group).await;
-        }
-        self.produce_unfenced(key, Some(value)).await
+        tokio::time::timeout(self.timeout, async {
+            if let Some(group) = group {
+                return self.produce_fenced(key, Some(value), group).await;
+            }
+            self.produce_unfenced(key, Some(value)).await
+        })
+        .await
+        .map_err(|_| anyhow::Error::new(StoreTimeout))?
     }
 
     /// Produce a non-transactional ordering barrier. The reader waits for this
@@ -83,8 +94,12 @@ impl SchemaWriter {
     ///
     /// Returns an error when the record cannot be produced or acknowledged.
     pub async fn barrier(&self, token: Uuid) -> anyhow::Result<()> {
-        self.produce_unfenced(barrier_key(token), Some(b"{}".to_vec()))
-            .await?;
+        tokio::time::timeout(
+            self.timeout,
+            self.produce_unfenced(barrier_key(token), Some(b"{}".to_vec())),
+        )
+        .await
+        .map_err(|_| anyhow::Error::new(StoreTimeout))??;
         Ok(())
     }
 
@@ -94,8 +109,32 @@ impl SchemaWriter {
     ///
     /// Returns an error when the tombstone cannot be produced or acknowledged.
     pub async fn clear_barrier(&self, token: Uuid) -> anyhow::Result<()> {
-        self.produce_unfenced(barrier_key(token), None).await?;
+        tokio::time::timeout(
+            self.timeout,
+            self.produce_unfenced(barrier_key(token), None),
+        )
+        .await
+        .map_err(|_| anyhow::Error::new(StoreTimeout))??;
         Ok(())
+    }
+
+    /// Initialize the transactional epoch before the primary ordering barrier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when initialization fails or exceeds the configured
+    /// schema-store timeout.
+    pub async fn fence(&self, group: &ConsumerGroupMetadata) -> anyhow::Result<()> {
+        tokio::time::timeout(self.timeout, async {
+            let mut state = self.fenced_state.lock().await;
+            if state.generation_id != Some(group.generation_id) {
+                self.fenced_producer.init_transactions().await?;
+                state.generation_id = Some(group.generation_id);
+            }
+            Ok::<(), anyhow::Error>(())
+        })
+        .await
+        .map_err(|_| anyhow::Error::new(StoreTimeout))?
     }
 
     async fn produce_unfenced(&self, key: Vec<u8>, value: Option<Vec<u8>>) -> anyhow::Result<i64> {
@@ -121,11 +160,8 @@ impl SchemaWriter {
         value: Option<Vec<u8>>,
         group: &ConsumerGroupMetadata,
     ) -> anyhow::Result<i64> {
-        let mut state = self.fenced_state.lock().await;
-        if state.generation_id != Some(group.generation_id) {
-            self.fenced_producer.init_transactions().await?;
-            state.generation_id = Some(group.generation_id);
-        }
+        let state = self.fenced_state.lock().await;
+        debug_assert_eq!(state.generation_id, Some(group.generation_id));
         let transaction = self.fenced_producer.begin_transaction().await?;
         let result = async {
             let metadata = self
@@ -174,11 +210,15 @@ impl SchemaWriter {
         key: Vec<u8>,
         group: Option<&ConsumerGroupMetadata>,
     ) -> anyhow::Result<i64> {
-        if let Some(group) = group {
-            self.produce_fenced(key, None, group).await
-        } else {
-            self.produce_unfenced(key, None).await
-        }
+        tokio::time::timeout(self.timeout, async {
+            if let Some(group) = group {
+                self.produce_fenced(key, None, group).await
+            } else {
+                self.produce_unfenced(key, None).await
+            }
+        })
+        .await
+        .map_err(|_| anyhow::Error::new(StoreTimeout))?
     }
 }
 
