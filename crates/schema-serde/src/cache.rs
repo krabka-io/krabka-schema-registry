@@ -590,27 +590,22 @@ impl SchemaCache {
 }
 
 fn schemas_equivalent(kind: SchemaKind, left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
     match kind {
-        SchemaKind::Json => serde_json::from_str::<serde_json::Value>(left)
+        SchemaKind::Avro | SchemaKind::Json => serde_json::from_str::<serde_json::Value>(left)
             .and_then(|left| {
                 serde_json::from_str::<serde_json::Value>(right).map(|right| left == right)
             })
             .unwrap_or(false),
-        #[cfg(feature = "avro")]
-        SchemaKind::Avro => apache_avro::Schema::parse_str(left)
-            .and_then(|left| {
-                apache_avro::Schema::parse_str(right)
-                    .map(|right| left.canonical_form() == right.canonical_form())
-            })
-            .unwrap_or(false),
-        #[cfg(not(feature = "avro"))]
-        SchemaKind::Avro => left == right,
         #[cfg(feature = "protobuf")]
         SchemaKind::Protobuf => protox_parse::parse("left.proto", left)
-            .and_then(|left| {
-                protox_parse::parse("right.proto", right).map(|right| {
-                    crate::format::protobuf::normalize(&left)
-                        == crate::format::protobuf::normalize(&right)
+            .and_then(|mut left| {
+                protox_parse::parse("left.proto", right).map(|mut right| {
+                    left.source_code_info = None;
+                    right.source_code_info = None;
+                    left == right
                 })
             })
             .unwrap_or(false),
@@ -967,6 +962,32 @@ mod tests {
             version: 2,
         };
         check!(references_equivalent(&[a.clone(), b.clone()], &[b, a]));
+    }
+
+    #[test]
+    fn exact_referenced_avro_and_protobuf_defaults_are_compared_safely() {
+        let referenced_avro =
+            r#"{"type":"record","name":"Invoice","fields":[{"name":"total","type":"Money"}]}"#;
+        check!(schemas_equivalent(
+            SchemaKind::Avro,
+            referenced_avro,
+            referenced_avro
+        ));
+        check!(!schemas_equivalent(
+            SchemaKind::Avro,
+            r#"{"type":"bytes","logicalType":"decimal","precision":8,"scale":2}"#,
+            r#"{"type":"bytes","logicalType":"decimal","precision":8,"scale":4}"#,
+        ));
+        check!(!schemas_equivalent(
+            SchemaKind::Protobuf,
+            r#"syntax = "proto2"; message Counter { optional int32 count = 1; }"#,
+            r#"syntax = "proto2"; message Counter { optional int32 count = 1 [default = 5]; }"#,
+        ));
+        check!(schemas_equivalent(
+            SchemaKind::Protobuf,
+            r#"syntax="proto3"; message Ping { string id=1; }"#,
+            r#"syntax = "proto3"; message Ping { string id = 1; }"#,
+        ));
     }
 
     #[tokio::test]
