@@ -406,6 +406,12 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let shutdown = CancellationToken::new();
+    let (audit, mut audit_events) = krabka_audit::AuditLog::new(1024);
+    tokio::spawn(async move {
+        while let Some(event) = audit_events.recv().await {
+            tracing::info!(audit_event = ?event, "schema registry security audit");
+        }
+    });
 
     // ── JWKS refresh task (bearer=jwks only) ────────────────────────────────
     if let Some(jwks) = jwks_handle {
@@ -430,6 +436,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let bearer = cfg.security.bearer.as_ref().map(|b| b.validator.clone());
     let auth = AuthState {
+        audit: audit.clone(),
         basic,
         bearer,
         require_auth: cfg.security.require_auth,
@@ -440,7 +447,11 @@ async fn main() -> anyhow::Result<()> {
     // ── Authorization (+ ACL refresh task) ──────────────────────────────────
     let authz = match &cfg.security.authz {
         Some(a) if a.enabled => {
-            let az = Arc::new(SchemaRegistryAuthz::new(a.super_users.clone(), true));
+            let az = Arc::new(SchemaRegistryAuthz::with_audit(
+                a.super_users.clone(),
+                true,
+                audit.clone(),
+            ));
             let admin = AdminClient::connect_with_options(
                 &split_bootstrap(&cfg.bootstrap),
                 krabka_client_core::ConnectionOptions {

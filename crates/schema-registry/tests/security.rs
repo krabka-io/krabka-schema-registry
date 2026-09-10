@@ -161,6 +161,7 @@ async fn start_secure_node(bootstrap: &str) -> Node {
     store.install_primary(primary.clone());
 
     let auth = AuthState {
+        audit: krabka_audit::AuditLog::disabled(),
         basic: Some(Arc::new(BasicAuthStore::from_users(alice_users()))),
         bearer: None,
         require_auth: true,
@@ -349,6 +350,7 @@ async fn start_mtls_node(bootstrap: &str, tls: TlsConfig, forward_http: reqwest:
     store.install_primary(primary.clone());
 
     let auth = AuthState {
+        audit: krabka_audit::AuditLog::disabled(),
         basic: None,
         bearer: None,
         require_auth: true,
@@ -584,6 +586,7 @@ async fn https_round_trip_enforces_auth_over_tls() {
     let mut primary = Election::start(&cfg, cancel.clone()).await.unwrap();
     store.install_primary(primary.clone());
     let auth = AuthState {
+        audit: krabka_audit::AuditLog::disabled(),
         basic: Some(Arc::new(BasicAuthStore::from_users(alice_users()))),
         bearer: None,
         require_auth: true,
@@ -896,6 +899,7 @@ async fn start_jwks_node(
 
     let bearer_validator = cfg.security.bearer.as_ref().map(|b| b.validator.clone());
     let auth = AuthState {
+        audit: krabka_audit::AuditLog::disabled(),
         basic: None,
         bearer: bearer_validator,
         require_auth: true,
