@@ -36,11 +36,60 @@ pub struct KafkaStore {
     pub store: Arc<RwLock<StoreState>>,
     barriers: Arc<reader::BarrierTracker>,
     barrier_rx: watch::Receiver<u64>,
-    writer: writer::SchemaWriter,
+    writer: Arc<writer::SchemaWriter>,
     write_gate: Mutex<()>,
     schemas_topic: String,
     election_group: String,
     primary: RwLock<Option<watch::Receiver<crate::election::PrimaryState>>>,
+}
+
+struct BarrierGuard {
+    token: uuid::Uuid,
+    barriers: Arc<reader::BarrierTracker>,
+    writer: Arc<writer::SchemaWriter>,
+    active: bool,
+}
+
+impl BarrierGuard {
+    async fn order(
+        barriers: Arc<reader::BarrierTracker>,
+        writer: Arc<writer::SchemaWriter>,
+    ) -> anyhow::Result<Self> {
+        let guard = Self {
+            token: barriers.reserve(),
+            barriers,
+            writer,
+            active: true,
+        };
+        guard.writer.barrier(guard.token).await?;
+        Ok(guard)
+    }
+
+    async fn finish(mut self, warning: &'static str) {
+        self.barriers.cancel(self.token);
+        match self.writer.clear_barrier(self.token).await {
+            Ok(()) => self.active = false,
+            Err(error) => tracing::warn!(%error, "{warning}"),
+        }
+    }
+}
+
+impl Drop for BarrierGuard {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        self.barriers.cancel(self.token);
+        let token = self.token;
+        let writer = self.writer.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                if let Err(error) = writer.clear_barrier(token).await {
+                    tracing::warn!(%error, "schema-store abandoned barrier cleanup failed");
+                }
+            });
+        }
+    }
 }
 
 pub struct RegisterSchema<'a> {
@@ -84,22 +133,18 @@ impl KafkaStore {
             security.clone(),
             cancel.clone(),
         );
-        let writer = writer::SchemaWriter::start(cfg, security).await?;
-        let initial_barrier = r.barriers.reserve();
-        if let Err(error) = writer.barrier(initial_barrier).await {
-            r.barriers.cancel(initial_barrier);
-            return Err(error);
-        }
+        let writer = Arc::new(writer::SchemaWriter::start(cfg, security).await?);
+        let initial_barrier = BarrierGuard::order(r.barriers.clone(), writer.clone()).await?;
         await_barrier_rx(
             r.barrier_rx.clone(),
             r.barriers.clone(),
-            initial_barrier,
+            initial_barrier.token,
             &cancel,
         )
         .await?;
-        if let Err(error) = writer.clear_barrier(initial_barrier).await {
-            tracing::warn!(%error, "schema-store startup barrier cleanup failed");
-        }
+        initial_barrier
+            .finish("schema-store startup barrier cleanup failed")
+            .await;
         Ok(Arc::new(Self {
             store: r.store,
             barriers: r.barriers,
@@ -648,28 +693,22 @@ impl KafkaStore {
         self.await_barrier(barrier).await
     }
 
-    async fn order_barrier(&self) -> Result<uuid::Uuid, SrError> {
-        let token = self.barriers.reserve();
-        if let Err(error) = self.writer.barrier(token).await {
-            self.barriers.cancel(token);
-            return Err(SrError::Backend(error.to_string()));
-        }
-        Ok(token)
+    async fn order_barrier(&self) -> Result<BarrierGuard, SrError> {
+        BarrierGuard::order(self.barriers.clone(), self.writer.clone())
+            .await
+            .map_err(|error| SrError::Backend(error.to_string()))
     }
 
-    async fn await_barrier(&self, barrier: uuid::Uuid) -> Result<(), SrError> {
+    async fn await_barrier(&self, barrier: BarrierGuard) -> Result<(), SrError> {
         let mut rx = self.barrier_rx.clone();
-        while !self.barriers.consume(barrier) {
+        while !self.barriers.consume(barrier.token) {
             if rx.changed().await.is_err() {
-                self.barriers.cancel(barrier);
                 return Err(SrError::Backend(
                     "schema-store reader stopped before applying the write".into(),
                 ));
             }
         }
-        if let Err(error) = self.writer.clear_barrier(barrier).await {
-            tracing::warn!(%error, "schema-store barrier cleanup failed");
-        }
+        barrier.finish("schema-store barrier cleanup failed").await;
         Ok(())
     }
 
