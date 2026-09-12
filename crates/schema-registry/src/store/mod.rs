@@ -31,6 +31,7 @@ pub struct RegisteredSchema {
     pub schema: String,
     pub references: Vec<crate::kafkastore::record::SchemaReference>,
     pub message_type: Option<String>,
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 /// A single subject-version's stored schema. This is the domain view that
@@ -44,6 +45,7 @@ pub struct VersionedSchema {
     pub schema: String,
     pub references: Vec<SchemaReference>,
     pub message_type: Option<String>,
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,14 +59,14 @@ pub struct ListedSchema {
     pub message_type: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct VersionEntry {
     version: SchemaVersion,
     id: SchemaId,
     deleted: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoreState {
     subjects: BTreeMap<String, Vec<VersionEntry>>,
     by_id: BTreeMap<SchemaId, RegisteredSchema>,
@@ -151,6 +153,7 @@ impl StoreState {
                     schema: schema.to_string(),
                     references: references.to_vec(),
                     message_type: message_type.map(str::to_string),
+                    extra: BTreeMap::new(),
                 },
             );
             id
@@ -313,6 +316,7 @@ impl StoreState {
                 schema: value.schema.clone(),
                 references: value.references.clone(),
                 message_type: value.message_type.clone(),
+                extra: value.extra.clone(),
             },
         );
         if let Ok(resolved) = self.resolve_closure(&value.references)
@@ -489,6 +493,7 @@ impl StoreState {
             schema: reg.schema.clone(),
             references: reg.references.clone(),
             message_type: reg.message_type.clone(),
+            extra: reg.extra.clone(),
         })
     }
 
@@ -672,7 +677,10 @@ impl StoreState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{format::SchemaType, kafkastore::record::SchemaReference};
+    use crate::{
+        format::SchemaType,
+        kafkastore::record::{SchemaRecord, SchemaReference},
+    };
 
     fn av(n: &str) -> String {
         format!("{{\"type\":\"record\",\"name\":\"{n}\",\"fields\":[]}}")
@@ -802,6 +810,28 @@ mod tests {
     }
 
     #[test]
+    fn avro_annotations_get_distinct_ids_while_formatting_dedups() {
+        let mut s = StoreState::default();
+        let plain = r#"{"type":"record","name":"A","fields":[{"name":"id","type":"int"}]}"#;
+        let defaulted =
+            r#"{"type":"record","name":"A","fields":[{"name":"id","type":"int","default":0}]}"#;
+        let documented =
+            r#"{"type":"record","name":"A","doc":"kept","fields":[{"name":"id","type":"int"}]}"#;
+        let reordered =
+            r#"{ "fields": [{"type":"int", "name":"id"}], "name":"A", "type":"record" }"#;
+
+        let registrations = [plain, defaulted, documented, reordered].map(|schema| {
+            s.register("av", SchemaType::Avro, schema, &[], None)
+                .unwrap()
+        });
+
+        assert2::assert!(registrations[0].id != registrations[1].id);
+        assert2::assert!(registrations[1].id != registrations[2].id);
+        assert2::assert!(registrations[0] == registrations[3]);
+        assert2::assert!(s.versions("av", false).unwrap() == vec![sv(1), sv(2), sv(3)]);
+    }
+
+    #[test]
     fn same_schema_new_subject_reuses_global_id_fresh_version() {
         let mut s = StoreState::default();
         let r1 = s
@@ -858,6 +888,7 @@ mod tests {
             references: vec![],
             schema: av("A"),
             deleted: false,
+            extra: BTreeMap::default(),
         };
         let k = SchemaKey::new("av-value", sv(1));
         s.apply_schema(&k, &v);
@@ -870,6 +901,45 @@ mod tests {
             .unwrap();
         assert2::assert!(r.id == sid(1));
         assert2::assert!(r.version == sv(1));
+    }
+
+    #[test]
+    fn soft_delete_encoding_preserves_unknown_schema_fields() {
+        let mut s = StoreState::default();
+        let mut extra = BTreeMap::new();
+        extra.insert(
+            "metadata".into(),
+            serde_json::json!({"properties": {"owner": "ops"}}),
+        );
+        let value = SchemaValue {
+            subject: "av".into(),
+            version: sv(1),
+            id: sid(1),
+            schema_type: None,
+            message_type: None,
+            references: vec![],
+            schema: av("A"),
+            deleted: false,
+            extra,
+        };
+        s.apply_schema(&SchemaKey::new("av", sv(1)), &value);
+        let found = s.version("av", Some(sv(1)), true).unwrap();
+
+        let (key, encoded) = crate::kafkastore::record::encode_schema_deleted_with_message_type(
+            "av",
+            found.version,
+            found.id,
+            found.ty,
+            &found.schema,
+            &found.references,
+            (found.message_type.as_deref(), &found.extra),
+        );
+
+        let SchemaRecord::Schema(_, deleted) = SchemaRecord::decode(&key, Some(&encoded)) else {
+            panic!("expected schema record");
+        };
+        assert2::check!(deleted.deleted);
+        assert2::check!(deleted.extra == value.extra);
     }
 
     #[test]
@@ -1077,6 +1147,7 @@ mod tests {
             references: vec![],
             schema: schema.into(),
             deleted,
+            extra: BTreeMap::default(),
         };
         s.apply_schema(&SchemaKey::new(subject, sv(version)), &v);
     }

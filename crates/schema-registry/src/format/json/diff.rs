@@ -18,12 +18,21 @@ pub enum Kind {
     PropertyRemovedFromOpenContentModel,
     PropertyAddedToClosedContentModel,
     PropertyRemovedFromClosedContentModel,
+    PropertyAddedCoveredByPartiallyOpenContentModel,
+    PropertyAddedNotCoveredByPartiallyOpenContentModel,
+    PropertyRemovedCoveredByPartiallyOpenContentModel,
+    PropertyRemovedNotCoveredByPartiallyOpenContentModel,
+    PropertyWithEmptySchemaAddedToOpenContentModel,
     // --- Required ---
     RequiredAttributeAdded,
     RequiredAttributeRemoved,
+    RequiredAttributeWithDefaultAdded,
+    RequiredPropertyWithDefaultAddedToClosedContentModel,
     // --- AdditionalProperties ---
     AdditionalPropertiesRemoved,
     AdditionalPropertiesAdded,
+    AdditionalPropertiesNarrowed,
+    AdditionalPropertiesExtended,
     // --- Enum / const ---
     EnumArrayNarrowed,
     EnumArrayExtended,
@@ -47,6 +56,8 @@ pub enum Kind {
     ExclusiveMinimumIncreased,
     MultipleOfAdded,
     MultipleOfRemoved,
+    MultipleOfReduced,
+    MultipleOfExpanded,
     MultipleOfChanged,
     // --- String ---
     MaxLengthAdded,
@@ -71,6 +82,10 @@ pub enum Kind {
     MinItemsIncreased,
     AdditionalItemsRemoved,
     AdditionalItemsAdded,
+    AdditionalItemsNarrowed,
+    AdditionalItemsExtended,
+    UniqueItemsAdded,
+    UniqueItemsRemoved,
     // --- Object size ---
     MaxPropertiesAdded,
     MaxPropertiesRemoved,
@@ -82,6 +97,7 @@ pub enum Kind {
     MinPropertiesIncreased,
     // --- Combinators ---
     CombinedTypeChanged,
+    CombinedTypeExtended,
     ProductTypeExtended,
     ProductTypeNarrowed,
     SumTypeExtended,
@@ -91,8 +107,13 @@ pub enum Kind {
     NotTypeNarrowed,
     CombinedTypeSubschemasChanged,
     // --- $ref / dependencies / conditionals ---
-    DependencyAdded,
-    DependencyRemoved,
+    DependencyArrayAdded,
+    DependencyArrayRemoved,
+    DependencyArrayExtended,
+    DependencyArrayNarrowed,
+    DependencyArrayChanged,
+    DependencySchemaAdded,
+    DependencySchemaRemoved,
     ConditionalChanged,
 }
 
@@ -165,18 +186,20 @@ fn compare_schema(
     ctx: &mut Ctx<'_>,
     out: &mut Vec<Difference>,
 ) {
+    if compare_refs(path, orig, upd, ctx, out) {
+        return;
+    }
     compare_type(path, orig, upd, out);
     compare_enum(path, orig, upd, out);
     compare_properties(path, orig, upd, ctx, out);
     compare_required(path, orig, upd, out);
-    compare_additional_properties(path, orig, upd, out);
+    compare_additional_properties(path, orig, upd, ctx, out);
     compare_numeric(path, orig, upd, out);
     compare_string_constraints(path, orig, upd, out);
     compare_array_constraints(path, orig, upd, ctx, out);
     compare_object_size(path, orig, upd, out);
     compare_combinators(path, orig, upd, ctx, out);
-    compare_refs(path, orig, upd, ctx, out);
-    compare_dependencies(path, orig, upd, out);
+    compare_dependencies(path, orig, upd, ctx, out);
     compare_conditionals(path, orig, upd, ctx, out);
 }
 
@@ -196,7 +219,11 @@ fn compare_type(path: &str, orig: &Value, upd: &Value, out: &mut Vec<Difference>
     if ot == ut {
         return;
     }
-    if ot.is_empty() && !ut.is_empty() {
+    if ot == BTreeSet::from(["integer".into()]) && ut == BTreeSet::from(["number".into()]) {
+        out.push(d(Kind::TypeExtended, path));
+    } else if (ot == BTreeSet::from(["number".into()]) && ut == BTreeSet::from(["integer".into()]))
+        || (ot.is_empty() && !ut.is_empty())
+    {
         out.push(d(Kind::TypeNarrowed, path));
     } else if ut.is_empty() && !ot.is_empty() {
         out.push(d(Kind::TypeExtended, path));
@@ -209,8 +236,42 @@ fn compare_type(path: &str, orig: &Value, upd: &Value, out: &mut Vec<Difference>
     }
 }
 
-fn is_closed(schema: &Value) -> bool {
-    matches!(schema.get("additionalProperties"), Some(Value::Bool(false)))
+enum ContentModel<'a> {
+    Open,
+    Partial,
+    Closed,
+    Schema(&'a Value),
+}
+
+fn content_model(schema: &Value) -> ContentModel<'_> {
+    match schema.get("additionalProperties") {
+        Some(Value::Bool(false)) => ContentModel::Closed,
+        Some(Value::Bool(true)) => ContentModel::Open,
+        Some(value) if value.is_object() => ContentModel::Schema(value),
+        _ if schema
+            .get("patternProperties")
+            .is_some_and(Value::is_object) =>
+        {
+            ContentModel::Partial
+        }
+        _ => ContentModel::Open,
+    }
+}
+
+fn covering_schemas<'a>(schema: &'a Value, property: &str) -> Vec<&'a Value> {
+    let mut result = Vec::new();
+    if let ContentModel::Schema(value) = content_model(schema) {
+        result.push(value);
+    }
+    if let Some(patterns) = schema.get("patternProperties").and_then(Value::as_object) {
+        result.extend(patterns.iter().filter_map(|(pattern, value)| {
+            regex::Regex::new(pattern)
+                .ok()
+                .filter(|regex| regex.is_match(property))
+                .map(|_| value)
+        }));
+    }
+    result
 }
 
 fn props(schema: &Value) -> Option<&serde_json::Map<String, Value>> {
@@ -236,29 +297,87 @@ fn compare_properties(
     ctx: &mut Ctx<'_>,
     out: &mut Vec<Difference>,
 ) {
-    let closed = is_closed(upd) || is_closed(orig);
     let empty = serde_json::Map::new();
     let op = props(orig).unwrap_or(&empty);
     let up = props(upd).unwrap_or(&empty);
     for name in op.keys() {
         if !up.contains_key(name) {
-            let kind = if closed {
-                Kind::PropertyRemovedFromClosedContentModel
-            } else {
-                Kind::PropertyRemovedFromOpenContentModel
-            };
-            out.push(d(kind, &format!("{path}/properties/{name}")));
+            let property_path = format!("{path}/properties/{name}");
+            let covering = covering_schemas(upd, name);
+            match content_model(upd) {
+                ContentModel::Open => {
+                    out.push(d(Kind::PropertyRemovedFromOpenContentModel, &property_path));
+                }
+                ContentModel::Closed => out.push(d(
+                    Kind::PropertyRemovedFromClosedContentModel,
+                    &property_path,
+                )),
+                ContentModel::Partial | ContentModel::Schema(_) if covering.is_empty() => {
+                    out.push(d(
+                        Kind::PropertyRemovedNotCoveredByPartiallyOpenContentModel,
+                        &property_path,
+                    ));
+                }
+                ContentModel::Partial | ContentModel::Schema(_) => {
+                    out.push(d(
+                        Kind::PropertyRemovedCoveredByPartiallyOpenContentModel,
+                        &property_path,
+                    ));
+                    for allowed in covering {
+                        compare_schema(&property_path, &op[name], allowed, ctx, out);
+                    }
+                }
+            }
         }
     }
     for (name, uschema) in up {
         match op.get(name) {
             None => {
-                let kind = if closed {
-                    Kind::PropertyAddedToClosedContentModel
-                } else {
-                    Kind::PropertyAddedToOpenContentModel
-                };
-                out.push(d(kind, &format!("{path}/properties/{name}")));
+                let property_path = format!("{path}/properties/{name}");
+                if required_set(upd).contains(name)
+                    && uschema.get("default").is_some()
+                    && !matches!(content_model(orig), ContentModel::Open)
+                {
+                    out.push(d(
+                        Kind::RequiredPropertyWithDefaultAddedToClosedContentModel,
+                        &property_path,
+                    ));
+                    continue;
+                }
+                if required_set(upd).contains(name) && uschema.get("default").is_none() {
+                    out.push(d(Kind::RequiredAttributeAdded, &property_path));
+                }
+                let covering = covering_schemas(orig, name);
+                match content_model(orig) {
+                    ContentModel::Open
+                        if uschema.as_object().is_some_and(serde_json::Map::is_empty) =>
+                    {
+                        out.push(d(
+                            Kind::PropertyWithEmptySchemaAddedToOpenContentModel,
+                            &property_path,
+                        ));
+                    }
+                    ContentModel::Open => {
+                        out.push(d(Kind::PropertyAddedToOpenContentModel, &property_path));
+                    }
+                    ContentModel::Closed => {
+                        out.push(d(Kind::PropertyAddedToClosedContentModel, &property_path));
+                    }
+                    ContentModel::Partial | ContentModel::Schema(_) if covering.is_empty() => out
+                        .push(d(
+                            Kind::PropertyAddedNotCoveredByPartiallyOpenContentModel,
+                            &property_path,
+                        )),
+                    ContentModel::Partial | ContentModel::Schema(_) => {
+                        out.push(d(
+                            Kind::PropertyAddedCoveredByPartiallyOpenContentModel,
+                            &property_path,
+                        ));
+                        for allowed in covering {
+                            compare_schema(&property_path, allowed, uschema, ctx, out);
+                        }
+                    }
+                }
             }
             Some(oschema) => {
                 compare_schema(
@@ -275,9 +394,19 @@ fn compare_properties(
 
 fn compare_required(path: &str, orig: &Value, upd: &Value, out: &mut Vec<Difference>) {
     let (orq, urq) = (required_set(orig), required_set(upd));
-    for name in urq.difference(&orq) {
+    let empty = serde_json::Map::new();
+    let op = props(orig).unwrap_or(&empty);
+    let up = props(upd).unwrap_or(&empty);
+    for name in urq
+        .difference(&orq)
+        .filter(|name| op.contains_key(*name) && up.contains_key(*name))
+    {
         out.push(d(
-            Kind::RequiredAttributeAdded,
+            if up[name].get("default").is_some() {
+                Kind::RequiredAttributeWithDefaultAdded
+            } else {
+                Kind::RequiredAttributeAdded
+            },
             &format!("{path}/required/{name}"),
         ));
     }
@@ -289,9 +418,13 @@ fn compare_required(path: &str, orig: &Value, upd: &Value, out: &mut Vec<Differe
     }
 }
 
-fn compare_additional_properties(path: &str, orig: &Value, upd: &Value, out: &mut Vec<Difference>) {
-    // NOTE: only the boolean open/closed transition is classified; a
-    // schema-valued additionalProperties narrowing is treated permissively.
+fn compare_additional_properties(
+    path: &str,
+    orig: &Value,
+    upd: &Value,
+    ctx: &mut Ctx<'_>,
+    out: &mut Vec<Difference>,
+) {
     let oa = orig.get("additionalProperties");
     let ua = upd.get("additionalProperties");
     let o_false = matches!(oa, Some(Value::Bool(false)));
@@ -300,6 +433,15 @@ fn compare_additional_properties(path: &str, orig: &Value, upd: &Value, out: &mu
         out.push(d(Kind::AdditionalPropertiesAdded, path));
     } else if !o_false && u_false {
         out.push(d(Kind::AdditionalPropertiesRemoved, path));
+    } else if oa.is_none() && ua.is_some_and(|value| !value.is_boolean()) {
+        out.push(d(Kind::AdditionalPropertiesNarrowed, path));
+    } else if ua.is_none() && oa.is_some_and(|value| !value.is_boolean()) {
+        out.push(d(Kind::AdditionalPropertiesExtended, path));
+    } else if let (Some(oa), Some(ua)) = (oa, ua)
+        && !oa.is_boolean()
+        && !ua.is_boolean()
+    {
+        compare_schema(&format!("{path}/additionalProperties"), oa, ua, ctx, out);
     }
 }
 
@@ -405,12 +547,24 @@ fn compare_numeric(path: &str, orig: &Value, upd: &Value, out: &mut Vec<Differen
             Kind::ExclusiveMinimumIncreased,
         ),
     );
-    // multipleOf: added or changed = tighter
     match (num(orig, "multipleOf"), num(upd, "multipleOf")) {
         (None, Some(_)) => out.push(d(Kind::MultipleOfAdded, path)),
         (Some(_), None) => out.push(d(Kind::MultipleOfRemoved, path)),
         (Some(o), Some(u)) if (o - u).abs() > f64::EPSILON => {
-            out.push(d(Kind::MultipleOfChanged, path));
+            let divisible = |larger: f64, smaller: f64| {
+                let quotient = larger / smaller;
+                (quotient - quotient.round()).abs() <= f64::EPSILON * quotient.abs().max(1.0)
+            };
+            out.push(d(
+                if divisible(o, u) {
+                    Kind::MultipleOfReduced
+                } else if divisible(u, o) {
+                    Kind::MultipleOfExpanded
+                } else {
+                    Kind::MultipleOfChanged
+                },
+                path,
+            ));
         }
         _ => {}
     }
@@ -494,14 +648,24 @@ fn compare_array_constraints(
     ctx: &mut Ctx<'_>,
     out: &mut Vec<Difference>,
 ) {
-    // items: if both are object schemas, recurse
     let oi = orig.get("items");
     let ui = upd.get("items");
-    if let (Some(oi), Some(ui)) = (oi, ui)
-        && oi.is_object()
-        && ui.is_object()
-    {
-        compare_schema(&format!("{path}/items"), oi, ui, ctx, out);
+    match (oi, ui) {
+        (Some(oi), Some(ui)) if oi.is_object() && ui.is_object() => {
+            compare_schema(&format!("{path}/items"), oi, ui, ctx, out);
+        }
+        (Some(Value::Array(oi)), Some(Value::Array(ui))) => {
+            for (index, (oi, ui)) in oi.iter().zip(ui).enumerate() {
+                compare_schema(&format!("{path}/items/{index}"), oi, ui, ctx, out);
+            }
+            if ui.len() > oi.len() {
+                out.push(d(Kind::AdditionalItemsRemoved, &format!("{path}/items")));
+            } else if oi.len() > ui.len() {
+                out.push(d(Kind::AdditionalItemsAdded, &format!("{path}/items")));
+            }
+        }
+        (Some(_), Some(_)) => out.push(d(Kind::TypeChanged, &format!("{path}/items"))),
+        _ => {}
     }
 
     compare_bound(
@@ -540,6 +704,28 @@ fn compare_array_constraints(
         out.push(d(Kind::AdditionalItemsRemoved, path));
     } else if o_false && !u_false {
         out.push(d(Kind::AdditionalItemsAdded, path));
+    } else if oa.is_none() && ua.is_some_and(|value| !value.is_boolean()) {
+        out.push(d(Kind::AdditionalItemsNarrowed, path));
+    } else if ua.is_none() && oa.is_some_and(|value| !value.is_boolean()) {
+        out.push(d(Kind::AdditionalItemsExtended, path));
+    } else if let (Some(oa), Some(ua)) = (oa, ua)
+        && !oa.is_boolean()
+        && !ua.is_boolean()
+    {
+        compare_schema(&format!("{path}/additionalItems"), oa, ua, ctx, out);
+    }
+
+    match (
+        orig.get("uniqueItems")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        upd.get("uniqueItems")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    ) {
+        (false, true) => out.push(d(Kind::UniqueItemsAdded, path)),
+        (true, false) => out.push(d(Kind::UniqueItemsRemoved, path)),
+        _ => {}
     }
 }
 
@@ -580,15 +766,57 @@ fn compare_object_size(path: &str, orig: &Value, upd: &Value, out: &mut Vec<Diff
 // Combinators: allOf / anyOf / oneOf / not
 // ---------------------------------------------------------------------------
 
-fn combinator_keyword(schema: &Value) -> Option<&str> {
-    ["allOf", "anyOf", "oneOf", "not"]
-        .iter()
-        .copied()
-        .find(|kw| schema.get(kw).is_some())
+fn branches<'a>(schema: &'a Value, keyword: &str) -> Option<&'a [Value]> {
+    schema
+        .get(keyword)
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
 }
 
-fn canonicalize_subschemas(arr: &[Value]) -> BTreeSet<String> {
-    arr.iter().map(canonical_value).collect()
+fn branch_compatible(orig: &Value, upd: &Value, ctx: &Ctx<'_>) -> bool {
+    let mut diffs = Vec::new();
+    let mut branch_ctx = Ctx::new(ctx.orig_root, ctx.upd_root, ctx.orig_refs, ctx.upd_refs);
+    compare_schema("#", orig, upd, &mut branch_ctx, &mut diffs);
+    diffs
+        .iter()
+        .all(|difference| super::compat::is_backward_compatible(&difference.kind))
+}
+
+fn maximum_matching(orig: &[Value], upd: &[Value], ctx: &Ctx<'_>) -> usize {
+    fn augment(
+        index: usize,
+        edges: &[Vec<usize>],
+        seen: &mut [bool],
+        matched: &mut [Option<usize>],
+    ) -> bool {
+        for &candidate in &edges[index] {
+            if seen[candidate] {
+                continue;
+            }
+            seen[candidate] = true;
+            if matched[candidate].is_none()
+                || augment(matched[candidate].unwrap(), edges, seen, matched)
+            {
+                matched[candidate] = Some(index);
+                return true;
+            }
+        }
+        false
+    }
+
+    let edges: Vec<Vec<usize>> = orig
+        .iter()
+        .map(|old| {
+            upd.iter()
+                .enumerate()
+                .filter_map(|(index, new)| branch_compatible(old, new, ctx).then_some(index))
+                .collect()
+        })
+        .collect();
+    let mut matched = vec![None; upd.len()];
+    (0..orig.len())
+        .filter(|&index| augment(index, &edges, &mut vec![false; upd.len()], &mut matched))
+        .count()
 }
 
 fn compare_combinators(
@@ -598,78 +826,89 @@ fn compare_combinators(
     ctx: &mut Ctx<'_>,
     out: &mut Vec<Difference>,
 ) {
-    let ok = combinator_keyword(orig);
-    let uk = combinator_keyword(upd);
-
-    match (ok, uk) {
-        (None, None) => {}
-        (Some(ok), Some(uk)) if ok == uk => {
-            // same keyword — compare subschemas
-            let cpath = format!("{path}/{ok}");
-            match ok {
-                "not" => {
-                    let on = orig.get("not").unwrap();
-                    let un = upd.get("not").unwrap();
-                    // recurse for structural diff; report change if canonical differs
-                    let oc = canonical_value(on);
-                    let uc = canonical_value(un);
-                    if oc != uc {
-                        // Conservative: any change to a `not` subschema is classified incompatible (NotTypeNarrowed); the cp matrix only exercises not-added (CombinedTypeChanged), so the directional split is unexercised.
-                        out.push(d(Kind::NotTypeNarrowed, &cpath));
-                        compare_schema(&format!("{path}/not"), on, un, ctx, out);
-                    }
-                }
-                "allOf" => {
-                    let os = orig
-                        .get("allOf")
-                        .and_then(Value::as_array)
-                        .map_or(&[] as &[Value], Vec::as_slice);
-                    let us = upd
-                        .get("allOf")
-                        .and_then(Value::as_array)
-                        .map_or(&[] as &[Value], Vec::as_slice);
-                    let oss = canonicalize_subschemas(os);
-                    let uss = canonicalize_subschemas(us);
-                    if oss != uss {
-                        if uss.is_superset(&oss) {
-                            // allOf: more constraints = NARROWER
-                            out.push(d(Kind::ProductTypeNarrowed, &cpath));
-                        } else if oss.is_superset(&uss) {
-                            out.push(d(Kind::ProductTypeExtended, &cpath));
-                        } else {
-                            out.push(d(Kind::CombinedTypeSubschemasChanged, &cpath));
-                        }
-                    }
-                }
-                "anyOf" | "oneOf" => {
-                    let os = orig
-                        .get(ok)
-                        .and_then(Value::as_array)
-                        .map_or(&[] as &[Value], Vec::as_slice);
-                    let us = upd
-                        .get(uk)
-                        .and_then(Value::as_array)
-                        .map_or(&[] as &[Value], Vec::as_slice);
-                    let oss = canonicalize_subschemas(os);
-                    let uss = canonicalize_subschemas(us);
-                    if oss != uss {
-                        if uss.is_superset(&oss) {
-                            // anyOf/oneOf: more alternatives = WIDER
-                            out.push(d(Kind::SumTypeExtended, &cpath));
-                        } else if oss.is_superset(&uss) {
-                            out.push(d(Kind::SumTypeNarrowed, &cpath));
-                        } else {
-                            out.push(d(Kind::CombinedTypeSubschemasChanged, &cpath));
-                        }
-                    }
-                }
-                _ => {}
+    match (branches(orig, "allOf"), branches(upd, "allOf")) {
+        (Some(old), Some(new)) if old != new => {
+            let matched = maximum_matching(old, new, ctx);
+            if matched < old.len().min(new.len()) {
+                out.push(d(
+                    Kind::CombinedTypeSubschemasChanged,
+                    &format!("{path}/allOf"),
+                ));
+            } else if new.len() > old.len() {
+                out.push(d(Kind::ProductTypeExtended, &format!("{path}/allOf")));
+            } else if new.len() < old.len() {
+                out.push(d(Kind::ProductTypeNarrowed, &format!("{path}/allOf")));
             }
         }
-        // Different keywords or one absent → incompatible structural change
-        (Some(_) | None, Some(_)) | (Some(_), None) => {
-            out.push(d(Kind::CombinedTypeChanged, path));
+        (Some(_), None) | (None, Some(_)) => out.push(d(Kind::CombinedTypeChanged, path)),
+        _ => {}
+    }
+
+    let orig_sum = branches(orig, "anyOf")
+        .map(|value| ("anyOf", value))
+        .or_else(|| branches(orig, "oneOf").map(|value| ("oneOf", value)));
+    let upd_sum = branches(upd, "anyOf")
+        .map(|value| ("anyOf", value))
+        .or_else(|| branches(upd, "oneOf").map(|value| ("oneOf", value)));
+    match (orig_sum, upd_sum) {
+        (Some((old_kind, _)), Some((new_kind, _))) if old_kind != new_kind => {
+            out.push(d(
+                if new_kind == "anyOf" {
+                    Kind::CombinedTypeExtended
+                } else {
+                    Kind::CombinedTypeChanged
+                },
+                path,
+            ));
         }
+        (Some((kind, old)), Some((_, new))) if old != new => {
+            let matched = maximum_matching(old, new, ctx);
+            if matched < old.len().min(new.len()) {
+                out.push(d(
+                    Kind::CombinedTypeSubschemasChanged,
+                    &format!("{path}/{kind}"),
+                ));
+            } else if new.len() > old.len() {
+                out.push(d(Kind::SumTypeExtended, &format!("{path}/{kind}")));
+            } else if new.len() < old.len() {
+                out.push(d(Kind::SumTypeNarrowed, &format!("{path}/{kind}")));
+            }
+        }
+        (None, Some((kind, new))) => out.push(d(
+            if new
+                .iter()
+                .any(|branch| branch_compatible(orig, branch, ctx))
+            {
+                Kind::SumTypeExtended
+            } else {
+                Kind::CombinedTypeChanged
+            },
+            &format!("{path}/{kind}"),
+        )),
+        (Some((kind, old)), None) => out.push(d(
+            if old.iter().all(|branch| branch_compatible(branch, upd, ctx)) {
+                Kind::SumTypeNarrowed
+            } else {
+                Kind::CombinedTypeChanged
+            },
+            &format!("{path}/{kind}"),
+        )),
+        _ => {}
+    }
+
+    match (orig.get("not"), upd.get("not")) {
+        (Some(old), Some(new)) if old != new => {
+            out.push(d(
+                if branch_compatible(new, old, ctx) {
+                    Kind::NotTypeNarrowed
+                } else {
+                    Kind::NotTypeExtended
+                },
+                &format!("{path}/not"),
+            ));
+        }
+        (Some(_), None) | (None, Some(_)) => out.push(d(Kind::CombinedTypeChanged, path)),
+        _ => {}
     }
 }
 
@@ -701,12 +940,12 @@ fn compare_refs(
     upd: &Value,
     ctx: &mut Ctx<'_>,
     out: &mut Vec<Difference>,
-) {
+) -> bool {
     let o_ref = orig.get("$ref").and_then(Value::as_str).map(String::from);
     let u_ref = upd.get("$ref").and_then(Value::as_str).map(String::from);
 
     if let (None, None) = (&o_ref, &u_ref) {
-        return;
+        return false;
     }
 
     // Build cycle-guard key from the two ref strings (or a sentinel for absent)
@@ -715,7 +954,7 @@ fn compare_refs(
         u_ref.clone().unwrap_or_default(),
     );
     if ctx.visited.contains(&key) {
-        return; // already walking this pair — cycle, stop
+        return true; // already walking this pair — cycle, stop
     }
     ctx.visited.insert(key.clone());
 
@@ -751,54 +990,75 @@ fn compare_refs(
     }
 
     ctx.visited.remove(&key);
+    true
 }
 
 // ---------------------------------------------------------------------------
 // Dependencies
 // ---------------------------------------------------------------------------
 
-fn dep_keys(schema: &Value) -> Option<BTreeSet<String>> {
-    // Check `dependencies` (draft-07) or `dependentRequired`/`dependentSchemas` (draft 2019-09+)
-    for kw in &["dependencies", "dependentRequired", "dependentSchemas"] {
-        if let Some(obj) = schema.get(kw).and_then(Value::as_object) {
-            return Some(obj.keys().cloned().collect());
+fn dependency_kind(value: &Value, added: bool) -> Kind {
+    if value.is_array() {
+        if added {
+            Kind::DependencyArrayAdded
+        } else {
+            Kind::DependencyArrayRemoved
         }
+    } else if added {
+        Kind::DependencySchemaAdded
+    } else {
+        Kind::DependencySchemaRemoved
     }
-    None
 }
 
-fn compare_dependencies(path: &str, orig: &Value, upd: &Value, out: &mut Vec<Difference>) {
-    let ok = dep_keys(orig);
-    let uk = dep_keys(upd);
-    match (ok, uk) {
-        (None, None) => {}
-        (None, Some(uk)) => {
-            for k in &uk {
-                out.push(d(
-                    Kind::DependencyAdded,
-                    &format!("{path}/dependencies/{k}"),
-                ));
+fn compare_dependencies(
+    path: &str,
+    orig: &Value,
+    upd: &Value,
+    ctx: &mut Ctx<'_>,
+    out: &mut Vec<Difference>,
+) {
+    // cp 7.4 loads draft-07 here; newer dependent* keywords are ignored.
+    for keyword in ["dependencies"] {
+        let empty = serde_json::Map::new();
+        let old = orig
+            .get(keyword)
+            .and_then(Value::as_object)
+            .unwrap_or(&empty);
+        let new = upd
+            .get(keyword)
+            .and_then(Value::as_object)
+            .unwrap_or(&empty);
+        for (name, value) in old {
+            let dependency_path = format!("{path}/{keyword}/{name}");
+            let Some(update) = new.get(name) else {
+                out.push(d(dependency_kind(value, false), &dependency_path));
+                continue;
+            };
+            match (value.as_array(), update.as_array()) {
+                (Some(old), Some(new)) => {
+                    let old: BTreeSet<_> = old.iter().filter_map(Value::as_str).collect();
+                    let new: BTreeSet<_> = new.iter().filter_map(Value::as_str).collect();
+                    if new.is_superset(&old) && new != old {
+                        out.push(d(Kind::DependencyArrayExtended, &dependency_path));
+                    } else if old.is_superset(&new) && new != old {
+                        out.push(d(Kind::DependencyArrayNarrowed, &dependency_path));
+                    } else if new != old {
+                        out.push(d(Kind::DependencyArrayChanged, &dependency_path));
+                    }
+                }
+                (None, None) if value.is_object() && update.is_object() => {
+                    compare_schema(&dependency_path, value, update, ctx, out);
+                }
+                _ if value != update => out.push(d(Kind::DependencyArrayChanged, &dependency_path)),
+                _ => {}
             }
         }
-        (Some(ok), None) => {
-            for k in &ok {
+        for (name, value) in new {
+            if !old.contains_key(name) {
                 out.push(d(
-                    Kind::DependencyRemoved,
-                    &format!("{path}/dependencies/{k}"),
-                ));
-            }
-        }
-        (Some(ok), Some(uk)) => {
-            for k in uk.difference(&ok) {
-                out.push(d(
-                    Kind::DependencyAdded,
-                    &format!("{path}/dependencies/{k}"),
-                ));
-            }
-            for k in ok.difference(&uk) {
-                out.push(d(
-                    Kind::DependencyRemoved,
-                    &format!("{path}/dependencies/{k}"),
+                    dependency_kind(value, true),
+                    &format!("{path}/{keyword}/{name}"),
                 ));
             }
         }
@@ -847,5 +1107,34 @@ fn compare_conditionals(
             }
             (None, None) => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{Ctx, branch_compatible, compare_with_refs, maximum_matching};
+
+    #[test]
+    fn references_resolve_before_diffing_and_cycles_terminate() {
+        let referenced = json!({"$ref": "#/$defs/T", "$defs": {"T": {"type": "integer"}}});
+        let inline = json!({"type": "integer"});
+        assert2::assert!(compare_with_refs(&referenced, &inline, &[], &[]).is_empty());
+        assert2::assert!(compare_with_refs(&inline, &referenced, &[], &[]).is_empty());
+        let recursive = json!({"$ref": "#"});
+        assert2::assert!(compare_with_refs(&recursive, &recursive, &[], &[]).is_empty());
+    }
+
+    #[test]
+    fn branch_matching_requires_compatible_coverage() {
+        let root = json!({});
+        let ctx = Ctx::new(&root, &root, &[], &[]);
+        let old = vec![json!({"type": "integer"}), json!({"type": "string"})];
+        let permuted = vec![json!({"type": "string"}), json!({"type": "number"})];
+        let missing = vec![json!({"type": "boolean"}), json!({"type": "number"})];
+        assert2::assert!(maximum_matching(&old, &permuted, &ctx) == 2);
+        assert2::assert!(maximum_matching(&old, &missing, &ctx) == 1);
+        assert2::assert!(branch_compatible(&old[0], &permuted[1], &ctx));
     }
 }

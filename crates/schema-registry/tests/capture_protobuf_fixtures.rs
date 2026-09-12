@@ -1,6 +1,6 @@
 //! Golden compatibility-verdict capture harness for Krabka Schema Registry slice 2b.
 //!
-//! Boots a real `mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0` container against an
+//! Boots a real `the pinned cp-schema-registry image` container against an
 //! in-process Krabka broker, then drives the compatibility check API for ~30
 //! Protobuf cases × 3 compatibility levels ≈ 90 entries. Verdicts are written to:
 //!
@@ -31,7 +31,8 @@ const LISTEN: &str = "0.0.0.0:9092";
 const CONTROLLER_LISTEN: &str = "0.0.0.0:9093";
 const ADVERTISED: &str = "host.docker.internal:9092";
 
-const SR_IMAGE: &str = "mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0";
+mod docker_support;
+use docker_support::SR_IMAGE;
 const SR_CONTENT_TYPE: &str = "application/vnd.schemaregistry.v1+json";
 
 // ── fixture paths ─────────────────────────────────────────────────────────────
@@ -480,6 +481,41 @@ fn protobuf_advanced_cases() -> Vec<CompatCase> {
             name: "package_change",
             writer: "syntax = \"proto3\";\npackage a;\nmessage U { int32 id = 1; }",
             reader: "syntax = \"proto3\";\npackage b;\nmessage U { int32 id = 1; }",
+        },
+        CompatCase {
+            name: "oneof_field_removed",
+            writer: "syntax = \"proto3\";\nmessage U { oneof x { int32 a = 1; int32 b = 2; } }",
+            reader: "syntax = \"proto3\";\nmessage U { oneof x { int32 a = 1; } }",
+        },
+        CompatCase {
+            name: "one_existing_plus_new_into_oneof",
+            writer: "syntax = \"proto3\";\nmessage U { int32 a = 1; }",
+            reader: "syntax = \"proto3\";\nmessage U { oneof x { int32 a = 1; int32 b = 2; } }",
+        },
+        CompatCase {
+            name: "proto2_required_added",
+            writer: "syntax = \"proto2\";\nmessage U {}",
+            reader: "syntax = \"proto2\";\nmessage U { required int32 a = 1; }",
+        },
+        CompatCase {
+            name: "proto2_required_removed",
+            writer: "syntax = \"proto2\";\nmessage U { required int32 a = 1; }",
+            reader: "syntax = \"proto2\";\nmessage U {}",
+        },
+        CompatCase {
+            name: "proto2_numeric_label_change",
+            writer: "syntax = \"proto2\";\nmessage U { optional int32 a = 1; }",
+            reader: "syntax = \"proto2\";\nmessage U { repeated int32 a = 1; }",
+        },
+        CompatCase {
+            name: "proto3_explicit_numeric_label_change",
+            writer: "syntax = \"proto3\";\nmessage U { optional int32 a = 1; }",
+            reader: "syntax = \"proto3\";\nmessage U { repeated int32 a = 1; }",
+        },
+        CompatCase {
+            name: "string_label_change",
+            writer: "syntax = \"proto2\";\nmessage U { optional string a = 1; }",
+            reader: "syntax = \"proto2\";\nmessage U { repeated string a = 1; }",
         },
     ]
 }

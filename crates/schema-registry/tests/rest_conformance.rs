@@ -1,5 +1,5 @@
 //! REST conformance: verifies our router's responses structurally match the
-//! byte-exact golden fixtures captured from a real `mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0`.
+//! byte-exact golden fixtures captured from a real `the pinned cp-schema-registry image`.
 //!
 //! No Docker is required. The suite starts an in-process broker and
 //! `KafkaStore` and drives the `axum` router through

@@ -1,7 +1,7 @@
 //! No-Docker conformance gate. It drives the compatibility engine directly
 //! against the golden cp-schema-registry verdicts in
-//! `tests/fixtures/compat/*_matrix.json`. There are 21 Avro cases, 88 Protobuf
-//! cases, and 92 JSON cases, all captured from real cp 7.4.0. cp is the
+//! `tests/fixtures/compat/*_matrix.json`. There are 36 Avro cases, 108 Protobuf
+//! cases, and 152 JSON cases, all captured from real cp 7.4.0. cp is the
 //! authority, and this gate fails if our engine diverges from a single verdict.
 
 use std::{

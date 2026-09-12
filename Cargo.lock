@@ -2629,6 +2629,7 @@ dependencies = [
  "prost-reflect",
  "protox-parse",
  "refined_type",
+ "regex",
  "reqwest 0.13.4",
  "ring",
  "rustls",

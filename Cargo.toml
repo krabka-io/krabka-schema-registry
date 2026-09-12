@@ -50,6 +50,7 @@ parking_lot = "0.12"
 prost = "0.14"
 prost-reflect = "0.16"
 refined_type = "0.6"
+regex = "1"
 ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
 schemars = "1.2"

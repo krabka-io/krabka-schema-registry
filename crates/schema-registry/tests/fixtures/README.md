@@ -7,11 +7,11 @@ Schema Registry implementation. Do **not** hand-edit them.
 
 ## Provenance
 
-- **Image:** `mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0`
+- **Image:** `mirror.gcr.io/confluentinc/cp-schema-registry@sha256:45894007bc1b54ae9db571328ec38d535b3a17e001a60956eb76f6a6212222d6`
 - **Broker:** in-process `krabka-broker`. It listens on `0.0.0.0:9092` and
   advertises `host.docker.internal:9092`. The container reaches it with
   `--add-host=host.docker.internal:host-gateway`.
-- **Captured:** 2026-06-05
+- **Captured:** 2026-09-11
 - **Harness:** `crates/schema-registry/tests/capture_fixtures.rs`
   (`#[ignore]`). Regenerate with:
 

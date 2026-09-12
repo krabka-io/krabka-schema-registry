@@ -614,5 +614,145 @@
     "level": "FULL",
     "reader": "syntax = \"proto3\";\npackage b;\nmessage U { int32 id = 1; }",
     "writer": "syntax = \"proto3\";\npackage a;\nmessage U { int32 id = 1; }"
+  },
+  {
+    "case": "oneof_field_removed",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "syntax = \"proto3\";\nmessage U { oneof x { int32 a = 1; } }",
+    "writer": "syntax = \"proto3\";\nmessage U { oneof x { int32 a = 1; int32 b = 2; } }"
+  },
+  {
+    "case": "oneof_field_removed",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "syntax = \"proto3\";\nmessage U { oneof x { int32 a = 1; } }",
+    "writer": "syntax = \"proto3\";\nmessage U { oneof x { int32 a = 1; int32 b = 2; } }"
+  },
+  {
+    "case": "one_existing_plus_new_into_oneof",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "syntax = \"proto3\";\nmessage U { oneof x { int32 a = 1; int32 b = 2; } }",
+    "writer": "syntax = \"proto3\";\nmessage U { int32 a = 1; }"
+  },
+  {
+    "case": "one_existing_plus_new_into_oneof",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "syntax = \"proto3\";\nmessage U { oneof x { int32 a = 1; int32 b = 2; } }",
+    "writer": "syntax = \"proto3\";\nmessage U { int32 a = 1; }"
+  },
+  {
+    "case": "one_existing_plus_new_into_oneof",
+    "is_compatible": true,
+    "level": "FULL",
+    "reader": "syntax = \"proto3\";\nmessage U { oneof x { int32 a = 1; int32 b = 2; } }",
+    "writer": "syntax = \"proto3\";\nmessage U { int32 a = 1; }"
+  },
+  {
+    "case": "proto2_required_added",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "syntax = \"proto2\";\nmessage U { required int32 a = 1; }",
+    "writer": "syntax = \"proto2\";\nmessage U {}"
+  },
+  {
+    "case": "proto2_required_added",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "syntax = \"proto2\";\nmessage U { required int32 a = 1; }",
+    "writer": "syntax = \"proto2\";\nmessage U {}"
+  },
+  {
+    "case": "proto2_required_added",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "syntax = \"proto2\";\nmessage U { required int32 a = 1; }",
+    "writer": "syntax = \"proto2\";\nmessage U {}"
+  },
+  {
+    "case": "proto2_required_removed",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "syntax = \"proto2\";\nmessage U {}",
+    "writer": "syntax = \"proto2\";\nmessage U { required int32 a = 1; }"
+  },
+  {
+    "case": "proto2_required_removed",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "syntax = \"proto2\";\nmessage U {}",
+    "writer": "syntax = \"proto2\";\nmessage U { required int32 a = 1; }"
+  },
+  {
+    "case": "proto2_required_removed",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "syntax = \"proto2\";\nmessage U {}",
+    "writer": "syntax = \"proto2\";\nmessage U { required int32 a = 1; }"
+  },
+  {
+    "case": "proto2_numeric_label_change",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "syntax = \"proto2\";\nmessage U { repeated int32 a = 1; }",
+    "writer": "syntax = \"proto2\";\nmessage U { optional int32 a = 1; }"
+  },
+  {
+    "case": "proto2_numeric_label_change",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "syntax = \"proto2\";\nmessage U { repeated int32 a = 1; }",
+    "writer": "syntax = \"proto2\";\nmessage U { optional int32 a = 1; }"
+  },
+  {
+    "case": "proto2_numeric_label_change",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "syntax = \"proto2\";\nmessage U { repeated int32 a = 1; }",
+    "writer": "syntax = \"proto2\";\nmessage U { optional int32 a = 1; }"
+  },
+  {
+    "case": "proto3_explicit_numeric_label_change",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "syntax = \"proto3\";\nmessage U { repeated int32 a = 1; }",
+    "writer": "syntax = \"proto3\";\nmessage U { optional int32 a = 1; }"
+  },
+  {
+    "case": "proto3_explicit_numeric_label_change",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "syntax = \"proto3\";\nmessage U { repeated int32 a = 1; }",
+    "writer": "syntax = \"proto3\";\nmessage U { optional int32 a = 1; }"
+  },
+  {
+    "case": "proto3_explicit_numeric_label_change",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "syntax = \"proto3\";\nmessage U { repeated int32 a = 1; }",
+    "writer": "syntax = \"proto3\";\nmessage U { optional int32 a = 1; }"
+  },
+  {
+    "case": "string_label_change",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "syntax = \"proto2\";\nmessage U { repeated string a = 1; }",
+    "writer": "syntax = \"proto2\";\nmessage U { optional string a = 1; }"
+  },
+  {
+    "case": "string_label_change",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "syntax = \"proto2\";\nmessage U { repeated string a = 1; }",
+    "writer": "syntax = \"proto2\";\nmessage U { optional string a = 1; }"
+  },
+  {
+    "case": "string_label_change",
+    "is_compatible": true,
+    "level": "FULL",
+    "reader": "syntax = \"proto2\";\nmessage U { repeated string a = 1; }",
+    "writer": "syntax = \"proto2\";\nmessage U { optional string a = 1; }"
   }
 ]

@@ -8,7 +8,8 @@ use krabka_schema_registry::{
     config::{RegistryConfig, SecurityConfig},
     election::{Election, PrimaryState},
     format::SchemaType,
-    kafkastore::{KafkaStore, RegisterSchema},
+    ids::{SchemaId, SchemaVersion},
+    kafkastore::{KafkaStore, RegisterSchema, record::SchemaReference},
     rest::{self, AppState, forward::ForwardState},
 };
 use tokio_util::sync::CancellationToken;
@@ -287,4 +288,119 @@ async fn cancelled_store_reader_returns_confluent_timeout() {
 
     node.cancel.cancel();
     broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restarting_store_replays_the_complete_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+        .await
+        .unwrap();
+    let config = cfg(&broker.listen_addr().to_string(), 8084);
+    let first_cancel = CancellationToken::new();
+    let first = KafkaStore::start(&config, first_cancel.clone())
+        .await
+        .unwrap();
+    let schema = |name| format!(r#"{{"type":"record","name":"{name}","fields":[]}}"#);
+
+    register(&first, "orders", &schema("Order"), &[], None, None).await;
+    register(&first, "deleted", &schema("Deleted"), &[], None, None).await;
+    register(&first, "retired", &schema("Retired"), &[], None, None).await;
+    register(&first, "base", &schema("Base"), &[], None, None).await;
+    let references = [SchemaReference {
+        name: "base.avsc".into(),
+        subject: "base".into(),
+        version: SchemaVersion(1),
+    }];
+    register(
+        &first,
+        "referencing",
+        &schema("UsesBase"),
+        &references,
+        None,
+        None,
+    )
+    .await;
+    first
+        .set_subject_mode("imported", "IMPORT".into())
+        .await
+        .unwrap();
+    register(
+        &first,
+        "imported",
+        &schema("Imported"),
+        &[],
+        Some(SchemaId(50)),
+        Some(SchemaVersion(7)),
+    )
+    .await;
+    first
+        .set_subject_mode("imported", "READWRITE".into())
+        .await
+        .unwrap();
+    first.set_global_compat("FULL".into()).await.unwrap();
+    first
+        .set_subject_compat("orders", "BACKWARD_TRANSITIVE".into())
+        .await
+        .unwrap();
+    first
+        .soft_delete_version("deleted", krabka_schema_registry::ids::SchemaVersion(1))
+        .await
+        .unwrap();
+    first
+        .soft_delete_version("retired", SchemaVersion(1))
+        .await
+        .unwrap();
+    first
+        .permanent_delete_version("retired", SchemaVersion(1))
+        .await
+        .unwrap();
+    register(&first, "retired", &schema("Replacement"), &[], None, None).await;
+    first.set_global_mode("READWRITE".into()).await.unwrap();
+    first
+        .set_subject_mode("orders", "READONLY".into())
+        .await
+        .unwrap();
+    let expected = first.store.read().clone();
+
+    first_cancel.cancel();
+    drop(first);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let second_cancel = CancellationToken::new();
+    let second = KafkaStore::start(&config, second_cancel.clone())
+        .await
+        .unwrap();
+
+    assert2::assert!(*second.store.read() == expected);
+    let next_schema = schema("Next");
+    let mut expected_after = expected.clone();
+    let expected_registration = expected_after
+        .register("next", SchemaType::Avro, &next_schema, &[], None)
+        .unwrap();
+    let actual = register(&second, "next", &next_schema, &[], None, None).await;
+    assert2::assert!(actual == expected_registration);
+    second_cancel.cancel();
+    broker.shutdown().await;
+}
+
+async fn register(
+    store: &KafkaStore,
+    subject: &str,
+    schema: &str,
+    references: &[SchemaReference],
+    import_id: Option<SchemaId>,
+    import_version: Option<SchemaVersion>,
+) -> krabka_schema_registry::store::Registered {
+    store
+        .register(RegisterSchema {
+            subject,
+            ty: SchemaType::Avro,
+            schema,
+            references,
+            message_type: None,
+            import_id,
+            import_version,
+        })
+        .await
+        .unwrap()
 }

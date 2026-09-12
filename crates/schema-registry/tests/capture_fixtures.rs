@@ -1,6 +1,6 @@
 //! Golden-fixture capture harness for the Krabka Schema Registry slice.
 //!
-//! This test stands up a **real** `mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0`
+//! This test stands up a **real** `the pinned cp-schema-registry image`
 //! container pointed at an in-process Krabka broker, registers a handful of
 //! AVRO / PROTOBUF / JSON schemas through the official REST API, and captures
 //! the byte-exact REST responses **and** the raw `_schemas` Kafka log records
@@ -54,7 +54,8 @@ const ADVERTISED: &str = "host.docker.internal:9092";
 /// `host.docker.internal` address, which a host process cannot resolve.
 const DIRECT_ADDR: &str = "127.0.0.1:9092";
 
-const SR_IMAGE: &str = "mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0";
+mod docker_support;
+use docker_support::SR_IMAGE;
 
 /// Content type cp-schema-registry expects on register POSTs.
 const SR_CONTENT_TYPE: &str = "application/vnd.schemaregistry.v1+json";

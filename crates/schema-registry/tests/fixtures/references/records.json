@@ -30,13 +30,28 @@
     "value": "{\"subject\":\"pb_order\",\"version\":1,\"id\":4,\"schemaType\":\"PROTOBUF\",\"references\":[{\"name\":\"money.proto\",\"subject\":\"pb_money\",\"version\":1}],\"schema\":\"syntax = \\\"proto3\\\";\\n\\nimport \\\"money.proto\\\";\\n\\nmessage Order {\\n  m.Money price = 1;\\n}\\n\",\"deleted\":false}"
   },
   {
-    "key": "{\"keytype\":\"SCHEMA\",\"subject\":\"js_amount\",\"version\":1,\"magic\":1}",
+    "key": "{\"keytype\":\"CONFIG\",\"subject\":\"pb_money\",\"magic\":0}",
     "offset": 6,
-    "value": "{\"subject\":\"js_amount\",\"version\":1,\"id\":5,\"schemaType\":\"JSON\",\"schema\":\"{\\\"type\\\":\\\"integer\\\",\\\"maximum\\\":10}\",\"deleted\":false}"
+    "value": "{\"subject\":\"pb_money\",\"compatibilityLevel\":\"NONE\"}"
+  },
+  {
+    "key": "{\"keytype\":\"SCHEMA\",\"subject\":\"pb_money\",\"version\":2,\"magic\":1}",
+    "offset": 7,
+    "value": "{\"subject\":\"pb_money\",\"version\":2,\"id\":5,\"schemaType\":\"PROTOBUF\",\"schema\":\"syntax = \\\"proto3\\\";\\npackage m;\\n\\nmessage Money {\\n  string cents = 1;\\n}\\n\",\"deleted\":false}"
+  },
+  {
+    "key": "{\"keytype\":\"CONFIG\",\"subject\":\"pb_order\",\"magic\":0}",
+    "offset": 8,
+    "value": "{\"subject\":\"pb_order\",\"compatibilityLevel\":\"BACKWARD\"}"
+  },
+  {
+    "key": "{\"keytype\":\"SCHEMA\",\"subject\":\"js_amount\",\"version\":1,\"magic\":1}",
+    "offset": 9,
+    "value": "{\"subject\":\"js_amount\",\"version\":1,\"id\":6,\"schemaType\":\"JSON\",\"schema\":\"{\\\"type\\\":\\\"integer\\\",\\\"maximum\\\":10}\",\"deleted\":false}"
   },
   {
     "key": "{\"keytype\":\"SCHEMA\",\"subject\":\"js_order\",\"version\":1,\"magic\":1}",
-    "offset": 7,
-    "value": "{\"subject\":\"js_order\",\"version\":1,\"id\":6,\"schemaType\":\"JSON\",\"references\":[{\"name\":\"Amount\",\"subject\":\"js_amount\",\"version\":1}],\"schema\":\"{\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"a\\\":{\\\"$ref\\\":\\\"Amount\\\"}}}\",\"deleted\":false}"
+    "offset": 10,
+    "value": "{\"subject\":\"js_order\",\"version\":1,\"id\":7,\"schemaType\":\"JSON\",\"references\":[{\"name\":\"Amount\",\"subject\":\"js_amount\",\"version\":1}],\"schema\":\"{\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"a\\\":{\\\"$ref\\\":\\\"Amount\\\"}}}\",\"deleted\":false}"
   }
 ]
