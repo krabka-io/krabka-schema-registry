@@ -19,6 +19,39 @@ schemasTopic: "_schemas"
 schemasTopicReplicationFactor: 3
 groupId: "schema-registry"
 
+# Client security for the connection from the registry to the broker. The
+# fields match the `kafkaClient` block of the SchemaRegistry CRD, so an
+# operator-managed deployment and this chart take the same values.
+kafkaClient:
+  # PLAINTEXT | SSL | SASL_PLAINTEXT | SASL_SSL
+  securityProtocol: PLAINTEXT
+  sasl:
+    # PLAIN | SCRAM-SHA-256 | SCRAM-SHA-512
+    mechanism: PLAIN
+    # Name of an existing Secret with a `username` key and a `password` key.
+    # A SASL security protocol requires it.
+    secretRef: ""
+  tls:
+    # Name of an existing Secret with a `ca.crt` key that holds the CA the
+    # registry trusts for the broker certificate. Empty uses the system roots.
+    caSecretName: ""
+    # TLS server name (SNI) for the broker connection. Empty uses the host from
+    # bootstrapServers.
+    serverNameOverride: ""
+
+# Probe timing. The names match the `healthChecks` block of the SchemaRegistry
+# CRD. The registry binds the REST port only after it replays the whole
+# `_schemas` topic, so the startup probe must cover the longest replay you
+# expect: startupFailureThreshold x startupPeriodSeconds, 5 minutes by default.
+# The liveness probe starts only after the startup probe passes.
+healthChecks:
+  startupPeriodSeconds: 5
+  startupFailureThreshold: 60
+  readinessInitialDelaySeconds: 2
+  readinessPeriodSeconds: 5
+  livenessInitialDelaySeconds: 5
+  livenessPeriodSeconds: 10
+
 resources:
   requests:
     cpu: 100m

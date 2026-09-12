@@ -11,6 +11,14 @@
 {{- end -}}
 {{- end -}}
 
+{{/* Name of the headless Service that gives each pod its DNS record. The
+"-headless" suffix is 9 characters, so the base name keeps 54 of the 63
+characters a DNS label allows. Without that reserve a long release name
+produces a Service that the API server rejects. */}}
+{{- define "krabka-schema-registry.headlessName" -}}
+{{- printf "%s-headless" (include "krabka-schema-registry.fullname" . | trunc 54 | trimSuffix "-") -}}
+{{- end -}}
+
 {{- define "krabka-schema-registry.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create -}}
 {{- default (include "krabka-schema-registry.fullname" .) .Values.serviceAccount.name -}}
