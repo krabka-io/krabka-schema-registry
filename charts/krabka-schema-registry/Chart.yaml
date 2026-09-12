@@ -17,6 +17,4 @@ keywords:
   - schema-registry
 maintainers:
   - name: The Krabka Authors
-# The logo file is still in the legacy monorepo. Move this URL when the asset
-# moves to a krabka-io repository.
-icon: https://raw.githubusercontent.com/robot-head/crabka/main/docs/crabka-square.png
+icon: https://krabka-io.github.io/logo.png

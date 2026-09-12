@@ -111,12 +111,16 @@ The chart default image is `ghcr.io/krabka-io/krabka-schema-registry`. This
 repository does not build that image yet. Set `image.repository` to an image
 you build until a packaging job lands here.
 
-## Not yet here
+## Packaging elsewhere
 
-The apko image definition and the operator's `SchemaRegistry` CRD still live in
-[`robot-head/crabka`](https://github.com/robot-head/crabka). The CRD belongs to
-that repository's operator crate, which is not moving, so that part of the
-packaging follows it.
+Two pieces of the packaging live in sibling repositories:
+
+- The `SchemaRegistry` CRD is in
+  [`krabka-io/krabka-operator`](https://github.com/krabka-io/krabka-operator),
+  under the `krabka.io` API group. The CRD belongs to the operator crate.
+- The apko image definition is in
+  [`krabka-io/tooling`](https://github.com/krabka-io/tooling), with the other
+  shared base-image inputs.
 
 ## License
 
