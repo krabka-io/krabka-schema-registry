@@ -1,0 +1,20 @@
+apiVersion: v2
+name: krabka-schema-registry
+description: Confluent Schema Registry-compatible service for Krabka
+type: application
+version: 0.1.0
+# appVersion tracks the crate release. It is the local default. The release job
+# overrides both version and appVersion from the workspace Cargo.toml when it
+# packages the chart, so you do not edit this by hand on release.
+appVersion: "0.4.0"
+kubeVersion: ">= 1.28.0-0"
+home: https://github.com/krabka-io/krabka-schema-registry
+sources:
+  - https://github.com/krabka-io/krabka-schema-registry
+keywords:
+  - kafka
+  - krabka
+  - schema-registry
+maintainers:
+  - name: The Krabka Authors
+icon: https://krabka-io.github.io/logo.png

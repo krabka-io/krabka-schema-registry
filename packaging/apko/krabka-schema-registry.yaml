@@ -1,0 +1,44 @@
+# The Schema Registry container image, built without a Dockerfile.
+#
+# apko assembles the image from APK packages. The `krabka-schema-registry`
+# package below is not in Wolfi. A melange recipe has to build it and the
+# builder has to hand apko that local repository:
+#
+#     apko publish packaging/apko/krabka-schema-registry.yaml <tag> \
+#       --repository-append "${PWD}/packages" \
+#       --keyring-append "${PWD}/melange.rsa.pub"
+#
+# No recipe builds that package today. See the README section "Packaging
+# elsewhere" for what is missing.
+contents:
+  repositories:
+    - https://packages.wolfi.dev/os
+  keyring:
+    - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+  packages:
+    - ca-certificates-bundle
+    - tzdata
+    - wolfi-baselayout
+    - glibc
+    - ld-linux
+    - busybox
+    - krabka-schema-registry
+
+accounts:
+  groups:
+    - groupname: nonroot
+      gid: 65532
+  users:
+    - username: nonroot
+      uid: 65532
+      gid: 65532
+  run-as: 65532
+
+entrypoint:
+  command: /usr/bin/krabka-schema-registry
+
+cmd: run
+
+archs:
+  - x86_64
+  - aarch64
