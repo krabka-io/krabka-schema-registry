@@ -1,6 +1,6 @@
 //! Backward-compatibility classification for Protobuf differences. CALIBRATED
 //! against the golden cp-schema-registry matrix, which is `compat_conformance` →
-//! `engine_matches_cp_protobuf_verdicts`, 88 cases from real cp 7.4.0. cp is the
+//! `engine_matches_cp_protobuf_verdicts`, 108 cases from real cp 7.4.0. cp is the
 //! authority, and every verdict below is the one cp emits.
 //!
 //! Direction note: `diff::compare(original, update)` is called with
@@ -20,6 +20,7 @@ pub fn is_backward_compatible(kind: &Kind) -> bool {
     match kind {
         Kind::FieldAdded
         | Kind::FieldRemoved
+        | Kind::OneofFieldAdded
         // A message present only on the reader side is fine for a reader (cp:
         // message_added is BACKWARD-compatible). The FORWARD case diffs to
         // `MessageRemoved`, which is incompatible below.
@@ -42,12 +43,14 @@ pub fn is_backward_compatible(kind: &Kind) -> bool {
         // Changing the proto package is compatible in cp (the package is not part
         // of the wire encoding).
         | Kind::PackageChanged
-        // singular ↔ repeated of the same type is compatible in cp (a reader can
-        // decode a single value as a length-1 repeated and vice versa).
-        | Kind::FieldLabelChanged => true,
+        | Kind::FieldStringOrBytesLabelChanged => true,
         Kind::FieldScalarKindChanged { compatible_group } => *compatible_group,
         Kind::FieldKindChanged
         | Kind::FieldNamedTypeChanged
+        | Kind::FieldNumericLabelChanged
+        | Kind::RequiredFieldAdded
+        | Kind::RequiredFieldRemoved
+        | Kind::OneofFieldRemoved
         // A field moved INTO a oneof (grouping ≥2 formerly-independent fields) is
         // BACKWARD-incompatible in cp (the mirror of `OneofFieldMovedOut`).
         | Kind::OneofFieldMovedIn

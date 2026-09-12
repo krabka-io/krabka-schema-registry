@@ -211,7 +211,7 @@ async fn reader_routes_to_schema_partition_leader() {
             &[CreateTopicSpec {
                 name: "_schemas".into(),
                 partitions: 1,
-                replicas: 1,
+                replicas: 3,
                 configs: BTreeMap::from([("cleanup.policy".into(), "compact".into())]),
             }],
             krabka_units::secs(10),
@@ -258,7 +258,7 @@ async fn reader_routes_to_schema_partition_leader() {
     let cancel = CancellationToken::new();
     let store = tokio::time::timeout(
         std::time::Duration::from_secs(30),
-        KafkaStore::start(&registry_cfg(&bootstrap, "_schemas", 1), cancel.clone()),
+        KafkaStore::start(&registry_cfg(&bootstrap, "_schemas", 3), cancel.clone()),
     )
     .await
     .expect("reader bootstrapped at a nonleader must start")

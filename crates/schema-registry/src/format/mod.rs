@@ -1,7 +1,7 @@
-//! Schema formats: parse, canonical storage form, and directional
+//! Schema formats: parse, normalized identity, and directional
 //! compatibility checks.
 //!
-//! The canonical form is the global-id deduplication key.
+//! The normalized identity is the global-id deduplication key.
 
 pub mod avro;
 pub mod json;
@@ -36,9 +36,9 @@ impl SchemaType {
     }
 }
 
-/// A successfully-parsed schema. `canonical_form()` is a stable string that
-/// serves as the global-id dedup key. Two schemas that differ only in
-/// formatting collide.
+/// A successfully-parsed schema. `canonical_form()` is a stable identity that
+/// serves as the global-id dedup key. Two schemas that differ only in formatting
+/// collide, while semantic annotations remain significant.
 pub trait ParsedSchema {
     fn canonical_form(&self) -> String;
 }
@@ -137,7 +137,7 @@ mod tests {
     }
 
     #[test]
-    fn avro_parses_and_dedups_by_canonical_form() {
+    fn avro_dedups_formatting_but_preserves_annotations() {
         let a = parse(
             SchemaType::Avro,
             r#"{"type":"record","name":"U","fields":[{"name":"id","type":"int"}]}"#,
@@ -160,6 +160,13 @@ mod tests {
         .unwrap();
         assert2::assert!(a_form == b_form);
         assert2::assert!(a_form != c.canonical_form());
+        let documented = parse(
+            SchemaType::Avro,
+            r#"{"type":"record","name":"U","doc":"important","fields":[{"name":"id","type":"int"}]}"#,
+            &[],
+        )
+        .unwrap();
+        assert2::assert!(a_form != documented.canonical_form());
     }
 
     #[test]

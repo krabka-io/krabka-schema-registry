@@ -1,6 +1,6 @@
 //! Golden HTTP-Basic-auth capture harness for Krabka Schema Registry slice 6.
 //!
-//! Boots a real `mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0` container with
+//! Boots a real `the pinned cp-schema-registry image` container with
 //! `authentication.method=BASIC` against an in-process Krabka broker, with the
 //! same networking as `capture_admin_fixtures.rs` and
 //! `capture_references_fixtures.rs`. The broker binds `0.0.0.0:9092` and
@@ -42,7 +42,8 @@ const LISTEN: &str = "0.0.0.0:9092";
 const CONTROLLER_LISTEN: &str = "0.0.0.0:9093";
 const ADVERTISED: &str = "host.docker.internal:9092";
 
-const SR_IMAGE: &str = "mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0";
+mod docker_support;
+use docker_support::SR_IMAGE;
 
 /// The JAAS entry name. cp's `authentication.realm` must equal this so the
 /// `BasicAuthenticator` resolves the `PropertyFileLoginModule` entry.

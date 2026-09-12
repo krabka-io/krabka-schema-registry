@@ -18,12 +18,17 @@ pub enum Kind {
     FieldScalarKindChanged { compatible_group: bool },
     FieldKindChanged,
     FieldNamedTypeChanged,
-    FieldLabelChanged,
+    FieldNumericLabelChanged,
+    FieldStringOrBytesLabelChanged,
+    RequiredFieldAdded,
+    RequiredFieldRemoved,
     MessageRemoved,
     MessageAdded,
     // Oneof rules
     OneofFieldMovedIn,
     OneofFieldMovedOut,
+    OneofFieldAdded,
+    OneofFieldRemoved,
     OneofAdded,
     OneofRemoved,
     // Reserved rules
@@ -70,6 +75,8 @@ enum FieldKind {
 struct Resolver<'a> {
     orig_enums: BTreeSet<&'a str>,
     upd_enums: BTreeSet<&'a str>,
+    orig_proto2: bool,
+    upd_proto2: bool,
 }
 
 impl Resolver<'_> {
@@ -133,6 +140,8 @@ pub fn compare(original: &FileDescriptorProto, update: &FileDescriptorProto) -> 
     let r = Resolver {
         orig_enums: collect_enum_names(original),
         upd_enums: collect_enum_names(update),
+        orig_proto2: original.syntax.as_deref() != Some("proto3"),
+        upd_proto2: update.syntax.as_deref() != Some("proto3"),
     };
     // Package change
     if original.package != update.package {
@@ -196,7 +205,15 @@ fn compare_message(
         let fpath = format!("{path}.#{num}");
         match upd_f.get(num) {
             None => out.push(Difference {
-                kind: Kind::FieldRemoved,
+                kind: if real_oneof(of) && !oneof_has_surviving_plain_member(orig, upd, of) {
+                    Kind::OneofFieldRemoved
+                } else if of.label()
+                    == prost_reflect::prost_types::field_descriptor_proto::Label::Required
+                {
+                    Kind::RequiredFieldRemoved
+                } else {
+                    Kind::FieldRemoved
+                },
                 path: fpath,
             }),
             Some(uf) => {
@@ -207,15 +224,24 @@ fn compare_message(
                 let upd_entry = find_map_entry(upd, uf);
                 match (orig_entry, upd_entry) {
                     (Some(oe), Some(ue)) => compare_map_entries(&fpath, oe, ue, r, out),
-                    _ => compare_field(&fpath, of, uf, upd, r, out),
+                    _ => compare_field(&fpath, of, uf, orig, upd, r, out),
                 }
             }
         }
     }
     for num in upd_f.keys() {
         if !orig_f.contains_key(num) {
+            let field = upd_f[num];
             out.push(Difference {
-                kind: Kind::FieldAdded,
+                kind: if real_oneof(field) {
+                    Kind::OneofFieldAdded
+                } else if field.label()
+                    == prost_reflect::prost_types::field_descriptor_proto::Label::Required
+                {
+                    Kind::RequiredFieldAdded
+                } else {
+                    Kind::FieldAdded
+                },
                 path: format!("{path}.#{num}"),
             });
         }
@@ -252,10 +278,28 @@ fn compare_message(
     compare_enums(path, &orig.enum_type, &upd.enum_type, out);
 }
 
+fn oneof_has_surviving_plain_member(
+    orig: &DescriptorProto,
+    upd: &DescriptorProto,
+    field: &FieldDescriptorProto,
+) -> bool {
+    let Some(index) = field.oneof_index else {
+        return false;
+    };
+    orig.field.iter().any(|member| {
+        member.oneof_index == Some(index)
+            && upd
+                .field
+                .iter()
+                .any(|candidate| candidate.number == member.number && !real_oneof(candidate))
+    })
+}
+
 fn compare_field(
     path: &str,
     of: &FieldDescriptorProto,
     uf: &FieldDescriptorProto,
+    orig_msg: &DescriptorProto,
     upd_msg: &DescriptorProto,
     r: &Resolver,
     out: &mut Vec<Difference>,
@@ -269,7 +313,7 @@ fn compare_field(
         // oneof is wire-identical to a plain field. cp treats "move one field
         // into its own oneof" (oneof_added) as compatible, but moving ≥2 formerly
         // independent fields into one oneof (oneof_move_in) as incompatible.
-        if oneof_member_count(upd_msg, uf) >= 2 {
+        if moved_existing_member_count(orig_msg, upd_msg, uf) >= 2 {
             out.push(Difference {
                 kind: Kind::OneofFieldMovedIn,
                 path: path.to_string(),
@@ -283,16 +327,29 @@ fn compare_field(
         });
     }
 
-    if of.label() != uf.label() {
+    let orig_kind = r.orig_kind(of);
+    let upd_kind = r.upd_kind(uf);
+    if of.label() != uf.label()
+        && explicit_label(of, r.orig_proto2)
+        && explicit_label(uf, r.upd_proto2)
+        && orig_kind == upd_kind
+    {
         out.push(Difference {
-            kind: Kind::FieldLabelChanged,
+            kind: if matches!(
+                orig_kind,
+                FieldKind::Scalar(FieldType::String | FieldType::Bytes)
+            ) {
+                Kind::FieldStringOrBytesLabelChanged
+            } else {
+                Kind::FieldNumericLabelChanged
+            },
             path: path.to_string(),
         });
     }
     compare_field_types(
         path,
-        r.orig_kind(of),
-        r.upd_kind(uf),
+        orig_kind,
+        upd_kind,
         of.type_name.as_ref(),
         uf.type_name.as_ref(),
         out,
@@ -341,14 +398,29 @@ fn compare_field_types(
 }
 
 /// How many fields belong to the same real oneof as `field` within `msg`.
-fn oneof_member_count(msg: &DescriptorProto, field: &FieldDescriptorProto) -> usize {
+fn moved_existing_member_count(
+    orig: &DescriptorProto,
+    upd: &DescriptorProto,
+    field: &FieldDescriptorProto,
+) -> usize {
     let Some(idx) = field.oneof_index else {
         return 0;
     };
-    msg.field
+    upd.field
         .iter()
         .filter(|f| f.oneof_index == Some(idx) && f.proto3_optional != Some(true))
+        .filter(|f| {
+            orig.field
+                .iter()
+                .any(|old| old.number == f.number && !real_oneof(old))
+        })
         .count()
+}
+
+fn explicit_label(field: &FieldDescriptorProto, proto2: bool) -> bool {
+    proto2
+        || field.proto3_optional == Some(true)
+        || field.label() == prost_reflect::prost_types::field_descriptor_proto::Label::Repeated
 }
 
 /// True only when this field is a real, user-declared oneof member.

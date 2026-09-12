@@ -38,7 +38,7 @@ crate_tests(
     # through `CARGO_MANIFEST_DIR`, which `rustc_env` below supplies.
     data = glob(["tests/fixtures/**"]),
     lib = "schema-registry",
-    # The nine capture and interop suites drive a real `cp-schema-registry`
+    # The ten capture and interop suites drive a real `cp-schema-registry`
     # container through the `docker` CLI and bind fixed ports 9092/9093. They
     # are `#[ignore]`d under Cargo for the same reason; `manual` is the Bazel
     # equivalent. They exist to regenerate the fixtures the hermetic suites
@@ -53,6 +53,7 @@ crate_tests(
         "capture_protobuf_fixtures",
         "capture_references_fixtures",
         "interop",
+        "interop_reverse",
     ],
     # The suites resolve their fixture paths from this, so Bazel has to set
     # what Cargo would have.

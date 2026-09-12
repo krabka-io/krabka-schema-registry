@@ -163,6 +163,131 @@ mod tests {
         assert2::assert!(parse("not json", &[]).is_err());
     }
 
+    #[test]
+    fn milestone_23_compatibility_rules() {
+        for (name, reader, writer, compatible) in [
+            (
+                "integer-to-number",
+                r#"{"type":"number"}"#,
+                r#"{"type":"integer"}"#,
+                true,
+            ),
+            (
+                "number-to-integer",
+                r#"{"type":"integer"}"#,
+                r#"{"type":"number"}"#,
+                false,
+            ),
+            (
+                "multiple-of-reduced",
+                r#"{"type":"integer","multipleOf":2}"#,
+                r#"{"type":"integer","multipleOf":4}"#,
+                true,
+            ),
+            (
+                "multiple-of-expanded",
+                r#"{"type":"integer","multipleOf":4}"#,
+                r#"{"type":"integer","multipleOf":2}"#,
+                false,
+            ),
+            (
+                "dependency-added",
+                r#"{"type":"object","dependencies":{"a":["b"]}}"#,
+                r#"{"type":"object"}"#,
+                false,
+            ),
+            (
+                "dependency-removed",
+                r#"{"type":"object"}"#,
+                r#"{"type":"object","dependencies":{"a":["b"]}}"#,
+                true,
+            ),
+            (
+                "tuple-type-changed",
+                r#"{"type":"array","items":[{"type":"string"}]}"#,
+                r#"{"type":"array","items":[{"type":"integer"}]}"#,
+                false,
+            ),
+            (
+                "unique-items-added",
+                r#"{"type":"array","uniqueItems":true}"#,
+                r#"{"type":"array"}"#,
+                false,
+            ),
+            (
+                "unique-items-removed",
+                r#"{"type":"array"}"#,
+                r#"{"type":"array","uniqueItems":true}"#,
+                true,
+            ),
+            (
+                "required-default",
+                r#"{"type":"object","properties":{"a":{"type":"string","default":""}},"required":["a"]}"#,
+                r#"{"type":"object","properties":{"a":{"type":"string","default":""}}}"#,
+                true,
+            ),
+            (
+                "required-default-closed",
+                r#"{"type":"object","additionalProperties":false,"properties":{"a":{"type":"string","default":""}},"required":["a"]}"#,
+                r#"{"type":"object","additionalProperties":false}"#,
+                true,
+            ),
+            (
+                "closed-to-open-removal",
+                r#"{"type":"object","properties":{"a":{"type":"integer"}}}"#,
+                r#"{"type":"object","additionalProperties":false,"properties":{"a":{"type":"integer"},"b":{"type":"string"}}}"#,
+                true,
+            ),
+            (
+                "pattern-covered",
+                r#"{"type":"object","patternProperties":{"^x":{"type":"string"}},"properties":{"x":{"type":"string"}}}"#,
+                r#"{"type":"object","patternProperties":{"^x":{"type":"string"}}}"#,
+                true,
+            ),
+            (
+                "additional-properties-narrowed",
+                r#"{"type":"object","additionalProperties":{"type":"string"}}"#,
+                r#"{"type":"object"}"#,
+                false,
+            ),
+            (
+                "plain-to-anyof",
+                r#"{"anyOf":[{"type":"string"},{"type":"integer"}]}"#,
+                r#"{"type":"string"}"#,
+                true,
+            ),
+            (
+                "anyof-branch-relaxed",
+                r#"{"anyOf":[{"type":"integer","maximum":10}]}"#,
+                r#"{"anyOf":[{"type":"integer","maximum":5}]}"#,
+                true,
+            ),
+            (
+                "oneof-to-anyof",
+                r#"{"anyOf":[{"type":"string"}]}"#,
+                r#"{"oneOf":[{"type":"string"}]}"#,
+                true,
+            ),
+            (
+                "not-narrowed",
+                r#"{"not":{"type":"integer"}}"#,
+                r#"{"not":{"type":"number"}}"#,
+                true,
+            ),
+            (
+                "second-combinator-changed",
+                r#"{"allOf":[{"type":"object"}],"anyOf":[{"type":"string"}]}"#,
+                r#"{"allOf":[{"type":"object"}],"anyOf":[{"type":"string"},{"type":"integer"}]}"#,
+                false,
+            ),
+        ] {
+            assert2::assert!(
+                check(reader, writer, &[], &[]).is_ok() == compatible,
+                "{name}"
+            );
+        }
+    }
+
     // cp is authority: adding a property to an open content model is
     // backward-INcompatible (`add_prop_open` BACKWARD=false in the cp golden
     // matrix), even though the property is "optional" — the reader expects a
@@ -551,9 +676,9 @@ mod tests {
             ref_only_on_writer_side_resolves_vs_reader as fn(),
         ),
         (
-            "dependency-added-is-compatible",
-            CompatibilityDisposition::Compatible,
-            dependency_added_is_compatible as fn(),
+            "dependency-added-is-incompatible",
+            CompatibilityDisposition::Incompatible,
+            dependency_added_is_incompatible as fn(),
         ),
         (
             "dependency-removed-is-compatible",
@@ -571,9 +696,9 @@ mod tests {
             dependent_schemas_added_is_compatible as fn(),
         ),
         (
-            "dependency-key-added-to-existing-map-is-compatible",
-            CompatibilityDisposition::Compatible,
-            dependency_key_added_to_existing_map_is_compatible as fn(),
+            "dependency-key-added-to-existing-map-is-incompatible",
+            CompatibilityDisposition::Incompatible,
+            dependency_key_added_to_existing_map_is_incompatible as fn(),
         ),
         (
             "dependency-key-removed-from-existing-map-is-compatible",
@@ -684,9 +809,9 @@ mod tests {
 
     #[test]
     fn compatibility_families_are_named_and_table_driven() {
-        for (_name, _disposition, run) in COMPATIBILITY_CASES {
+        for (name, _disposition, run) in COMPATIBILITY_CASES {
             let result = std::panic::catch_unwind(*run);
-            assert2::assert!(result.is_ok());
+            assert2::assert!(result.is_ok(), "{name}");
         }
     }
 
@@ -1171,8 +1296,8 @@ mod tests {
 
     fn allof_subschemas_disjoint_is_incompatible() {
         // neither is a subset → CombinedTypeSubschemasChanged
-        let w = r#"{"allOf":[{"required":["a"]}]}"#;
-        let r = r#"{"allOf":[{"required":["b"]}]}"#;
+        let w = r#"{"allOf":[{"type":"string"}]}"#;
+        let r = r#"{"allOf":[{"type":"boolean"}]}"#;
         assert2::assert!(check(r, w, &[], &[]).is_err());
     }
 
@@ -1249,11 +1374,10 @@ mod tests {
     // Dependencies: add / remove; dependentRequired / dependentSchemas variants
     // -----------------------------------------------------------------------
 
-    fn dependency_added_is_compatible() {
-        // writer has no dependencies; reader adds one → DependencyAdded → compatible
+    fn dependency_added_is_incompatible() {
         let w = r#"{"type":"object"}"#;
         let r = r#"{"type":"object","dependencies":{"foo":["bar"]}}"#;
-        assert2::assert!(check(r, w, &[], &[]).is_ok());
+        assert2::assert!(check(r, w, &[], &[]).is_err());
     }
 
     fn dependency_removed_is_compatible() {
@@ -1275,10 +1399,10 @@ mod tests {
         assert2::assert!(check(r, w, &[], &[]).is_ok());
     }
 
-    fn dependency_key_added_to_existing_map_is_compatible() {
+    fn dependency_key_added_to_existing_map_is_incompatible() {
         let w = r#"{"type":"object","dependencies":{"foo":["bar"]}}"#;
         let r = r#"{"type":"object","dependencies":{"foo":["bar"],"baz":["qux"]}}"#;
-        assert2::assert!(check(r, w, &[], &[]).is_ok());
+        assert2::assert!(check(r, w, &[], &[]).is_err());
     }
 
     fn dependency_key_removed_from_existing_map_is_compatible() {

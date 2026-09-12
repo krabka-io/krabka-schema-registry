@@ -101,6 +101,7 @@ fn decode_handles_noop_and_schema_and_tombstone() {
                         r#"{"type":"record","name":"User","fields":[{"name":"id","type":"int"}]}"#
                             .into(),
                     deleted: false,
+                    extra: std::collections::BTreeMap::default(),
                 }
             );
         }
@@ -109,7 +110,11 @@ fn decode_handles_noop_and_schema_and_tombstone() {
     // Unknown keytype -> Unknown (never panics).
     assert2::assert!(matches!(
         SchemaRecord::decode(br#"{"keytype":"WAT","magic":9}"#, None),
-        SchemaRecord::Unknown
+        SchemaRecord::Unknown { ref keytype } if keytype == "WAT"
+    ));
+    assert2::assert!(matches!(
+        SchemaRecord::decode(br"not-json", None),
+        SchemaRecord::Undecodable { keytype: None }
     ));
 }
 
@@ -124,6 +129,7 @@ fn schema_value_round_trips() {
         references: vec![],
         schema: "{\"type\":\"int\"}".into(),
         deleted: false,
+        extra: std::collections::BTreeMap::default(),
     };
     let s = serde_json::to_string(&v).unwrap();
     assert2::assert!(serde_json::from_str::<SchemaValue>(&s).unwrap() == v);

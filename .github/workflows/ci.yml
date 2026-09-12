@@ -2,7 +2,9 @@ name: ci
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [claude/broker-schema-validation-registry-s451bp]
+  schedule:
+    - cron: "17 4 * * 1"
   workflow_dispatch:
 
 permissions:
@@ -13,10 +15,10 @@ permissions:
   # on every job.
   id-token: write
 
-# Cancel superseded PR runs; let pushes to main run to completion.
+# Cancel superseded PR runs; let pushes to the default branch run to completion.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  cancel-in-progress: ${{ github.ref != format('refs/heads/{0}', github.event.repository.default_branch) }}
 
 jobs:
   # Build, test, lint and format. The Aspect CLI narrows each of these to what
@@ -27,7 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Change detection needs the merge base, not just the tip.
           fetch-depth: 0
@@ -55,8 +57,62 @@ jobs:
       - name: build
         run: aspect build //...
 
+      - name: compile Docker interoperability suites
+        run: |
+          bazel build \
+            //crates/schema-registry:capture_admin_fixtures_test \
+            //crates/schema-registry:capture_auth_fixtures_test \
+            //crates/schema-registry:capture_compat_fixtures_test \
+            //crates/schema-registry:capture_election_fixtures_test \
+            //crates/schema-registry:capture_fixtures_test \
+            //crates/schema-registry:capture_json_fixtures_test \
+            //crates/schema-registry:capture_protobuf_fixtures_test \
+            //crates/schema-registry:capture_references_fixtures_test \
+            //crates/schema-registry:interop_test \
+            //crates/schema-registry:interop_reverse_test
+
       - name: test
         run: aspect test //...
+
+      - name: enforce Cargo lint and supply-chain policy
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --component clippy
+          cargo +1.97.1 clippy --workspace --all-targets -- -D warnings
+          cargo install cargo-deny --locked --version 0.20.2
+          cargo deny check
+
+  docker-interop:
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    name: Docker compatibility fixtures
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-docker
+          repository-cache: true
+      - name: run pinned Confluent suites serially
+        run: |
+          set -euo pipefail
+          for suite in \
+            capture_admin_fixtures \
+            capture_auth_fixtures \
+            capture_compat_fixtures \
+            capture_election_fixtures \
+            capture_fixtures \
+            capture_json_fixtures \
+            capture_protobuf_fixtures \
+            capture_references_fixtures \
+            interop \
+            interop_reverse
+          do
+            bazel test "//crates/schema-registry:${suite}_test" \
+              --jobs=1 --local_test_jobs=1 --test_arg=--ignored --test_arg=--nocapture
+          done
+          test -z "$(git status --short -- crates/schema-registry/tests/fixtures/)"
 
   # LCOV over the two first-party crates. Separate from `ci` because
   # instrumented binaries are a different build, so sharing that job's cache

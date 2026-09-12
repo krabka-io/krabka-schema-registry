@@ -88,7 +88,28 @@ pub fn check(
 ) -> Result<(), Vec<String>> {
     let reader_d = parse(reader, reader_refs).map_err(|e| vec![format!("reader: {e}")])?;
     let writer_d = parse(writer, writer_refs).map_err(|e| vec![format!("writer: {e}")])?;
-    let diffs = diff::compare(writer_d.descriptor(), reader_d.descriptor());
+    let mut diffs = diff::compare(writer_d.descriptor(), reader_d.descriptor());
+    for writer_ref in writer_refs
+        .iter()
+        .filter(|reference| reference.ty == super::SchemaType::Protobuf)
+    {
+        let Some(reader_ref) = reader_refs.iter().find(|reference| {
+            reference.ty == super::SchemaType::Protobuf && reference.name == writer_ref.name
+        }) else {
+            continue;
+        };
+        if writer_ref.schema == reader_ref.schema {
+            continue;
+        }
+        let writer_ref = parse(&writer_ref.schema, writer_refs)
+            .map_err(|error| vec![format!("writer reference: {error}")])?;
+        let reader_ref = parse(&reader_ref.schema, reader_refs)
+            .map_err(|error| vec![format!("reader reference: {error}")])?;
+        diffs.extend(diff::compare(
+            writer_ref.descriptor(),
+            reader_ref.descriptor(),
+        ));
+    }
     tracing::Span::current().record("diffs", diffs.len());
     let incompatible: Vec<&diff::Difference> = diffs
         .iter()
@@ -278,6 +299,59 @@ mod tests {
         }
     }
 
+    #[test]
+    fn milestone_23_field_rules() {
+        for (name, reader, writer, compatible) in [
+            (
+                "oneof-field-removed",
+                "syntax = \"proto3\"; message U { oneof x { int32 a = 1; } }",
+                "syntax = \"proto3\"; message U { oneof x { int32 a = 1; int32 b = 2; } }",
+                false,
+            ),
+            (
+                "existing-plus-new-moved-to-oneof",
+                "syntax = \"proto3\"; message U { oneof x { int32 a = 1; int32 b = 2; } }",
+                "syntax = \"proto3\"; message U { int32 a = 1; }",
+                true,
+            ),
+            (
+                "proto2-required-added",
+                "syntax = \"proto2\"; message U { required int32 a = 1; }",
+                "syntax = \"proto2\"; message U {}",
+                false,
+            ),
+            (
+                "proto2-required-removed",
+                "syntax = \"proto2\"; message U {}",
+                "syntax = \"proto2\"; message U { required int32 a = 1; }",
+                false,
+            ),
+            (
+                "proto2-numeric-label",
+                "syntax = \"proto2\"; message U { repeated int32 a = 1; }",
+                "syntax = \"proto2\"; message U { optional int32 a = 1; }",
+                false,
+            ),
+            (
+                "proto3-explicit-numeric-label",
+                "syntax = \"proto3\"; message U { repeated int32 a = 1; }",
+                "syntax = \"proto3\"; message U { optional int32 a = 1; }",
+                false,
+            ),
+            (
+                "string-label",
+                "syntax = \"proto2\"; message U { repeated string a = 1; }",
+                "syntax = \"proto2\"; message U { optional string a = 1; }",
+                true,
+            ),
+        ] {
+            assert2::assert!(
+                check(reader, writer, &[], &[]).is_ok() == compatible,
+                "{name}"
+            );
+        }
+    }
+
     // ── reference resolution ─────────────────────────────────────────────────
 
     #[test]
@@ -301,6 +375,32 @@ mod tests {
         ] {
             assert2::assert!(parse(candidate, &refs).is_ok() == expected);
         }
+    }
+
+    #[test]
+    fn protobuf_diffs_changed_imports() {
+        use crate::format::{ResolvedReference, SchemaType};
+        let candidate =
+            "syntax = \"proto3\"; import \"money.proto\"; message Order { m.Money price = 1; }";
+        let reference = |schema: &str| ResolvedReference {
+            name: "money.proto".into(),
+            ty: SchemaType::Protobuf,
+            schema: schema.into(),
+        };
+        let old = reference("syntax = \"proto3\"; package m; message Money { int64 cents = 1; }");
+        let changed =
+            reference("syntax = \"proto3\"; package m; message Money { string cents = 1; }");
+
+        assert2::assert!(
+            check(
+                candidate,
+                candidate,
+                std::slice::from_ref(&old),
+                std::slice::from_ref(&old)
+            )
+            .is_ok()
+        );
+        assert2::assert!(check(candidate, candidate, &[changed], &[old]).is_err());
     }
 
     #[test]

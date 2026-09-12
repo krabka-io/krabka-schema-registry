@@ -41,6 +41,8 @@ pub struct StoreReader {
     pub barriers: Arc<BarrierTracker>,
     pub barrier_rx: watch::Receiver<u64>,
     failures: Arc<AtomicU64>,
+    pub(crate) unknown_records: Arc<AtomicU64>,
+    pub(crate) undecodable_records: Arc<AtomicU64>,
 }
 
 #[derive(Default)]
@@ -112,6 +114,18 @@ impl StoreReader {
     #[must_use]
     pub fn failure_count(&self) -> u64 {
         self.failures.load(Ordering::Relaxed)
+    }
+
+    #[must_use]
+    /// Number of records whose key type is not supported by this registry.
+    pub fn unknown_record_count(&self) -> u64 {
+        self.unknown_records.load(Ordering::Relaxed)
+    }
+
+    #[must_use]
+    /// Number of records whose known key or value could not be decoded.
+    pub fn undecodable_record_count(&self) -> u64 {
+        self.undecodable_records.load(Ordering::Relaxed)
     }
 }
 
@@ -412,13 +426,48 @@ pub fn apply_record(store: &RwLock<StoreState>, rec: SchemaRecord) {
                 store.write().clear_subject_compat(&subj);
             }
         }
-        SchemaRecord::Noop | SchemaRecord::Unknown => {}
+        SchemaRecord::Noop | SchemaRecord::Unknown { .. } | SchemaRecord::Undecodable { .. } => {}
     }
+}
+
+fn account_unsupported(
+    record: SchemaRecord,
+    offset: i64,
+    unknown: &AtomicU64,
+    undecodable: &AtomicU64,
+) -> SchemaRecord {
+    match &record {
+        SchemaRecord::Unknown { keytype } => {
+            let count = unknown.fetch_add(1, Ordering::Relaxed) + 1;
+            if count.is_power_of_two() {
+                tracing::warn!(
+                    offset,
+                    keytype,
+                    count,
+                    "store reader: unsupported schema record"
+                );
+            }
+        }
+        SchemaRecord::Undecodable { keytype } => {
+            let count = undecodable.fetch_add(1, Ordering::Relaxed) + 1;
+            if count.is_power_of_two() {
+                tracing::warn!(
+                    offset,
+                    ?keytype,
+                    count,
+                    "store reader: undecodable schema record"
+                );
+            }
+        }
+        _ => {}
+    }
+    record
 }
 
 /// Spawn the reader. It returns the shared store and an offset watch
 /// immediately. The background task runs until `cancel` fires.
 #[must_use]
+#[allow(clippy::too_many_lines)] // One select loop owns the reader state machine.
 pub fn spawn(
     cfg: &RegistryConfig,
     topic_id: WireUuid,
@@ -440,6 +489,10 @@ pub fn spawn(
     let frame_max = cfg.runtime.client_frame_max;
     let failures = Arc::new(AtomicU64::new(0));
     let failures_bg = failures.clone();
+    let unknown_records = Arc::new(AtomicU64::new(0));
+    let unknown_records_bg = unknown_records.clone();
+    let undecodable_records = Arc::new(AtomicU64::new(0));
+    let undecodable_records_bg = undecodable_records.clone();
 
     tokio::spawn(async move {
         let opts = ConnectionOptions {
@@ -539,7 +592,12 @@ pub fn spawn(
                                     if let Some(token) = barrier_token(key, r.value.as_deref()) {
                                         observed_barriers.push(token);
                                     }
-                                    let record = SchemaRecord::decode(key, r.value.as_deref());
+                                    let record = account_unsupported(
+                                        SchemaRecord::decode(key, r.value.as_deref()),
+                                        r.offset,
+                                        &unknown_records_bg,
+                                        &undecodable_records_bg,
+                                    );
                                     if let Some(rebuild) = &mut rebuild {
                                         apply_record(&rebuild.store, record);
                                     } else {
@@ -629,6 +687,8 @@ pub fn spawn(
         barriers,
         barrier_rx,
         failures,
+        unknown_records,
+        undecodable_records,
     }
 }
 
@@ -678,6 +738,7 @@ mod tests {
             references: vec![],
             schema: "{\"type\":\"int\"}".into(),
             deleted: false,
+            extra: std::collections::BTreeMap::default(),
         };
         apply_record(&store, SchemaRecord::Schema(k, v));
         apply_record(&store, SchemaRecord::Noop);
@@ -754,6 +815,33 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_records_are_classified_and_counted_with_offsets() {
+        let unknown = AtomicU64::new(0);
+        let undecodable = AtomicU64::new(0);
+        let store = RwLock::new(StoreState::default());
+
+        for (offset, key, value) in [
+            (41, br#"{"keytype":"CONTEXT","magic":1}"#.as_slice(), None),
+            (
+                42,
+                br#"{"keytype":"SCHEMA","subject":"s","version":1,"magic":1}"#.as_slice(),
+                Some(br#"{"broken":true}"#.as_slice()),
+            ),
+        ] {
+            let record = account_unsupported(
+                SchemaRecord::decode(key, value),
+                offset,
+                &unknown,
+                &undecodable,
+            );
+            apply_record(&store, record);
+        }
+
+        assert2::check!(unknown.load(Ordering::Relaxed) == 1);
+        assert2::check!(undecodable.load(Ordering::Relaxed) == 1);
+    }
+
+    #[test]
     fn rebuild_keeps_live_state_until_snapshot_is_complete() {
         let defaults = StoreState::default();
         let store = RwLock::new(defaults.clone());
@@ -770,6 +858,7 @@ mod tests {
                     references: vec![],
                     schema: r#"{"type":"string"}"#.into(),
                     deleted: false,
+                    extra: std::collections::BTreeMap::default(),
                 },
             ),
         );
@@ -812,6 +901,7 @@ mod tests {
                     references: vec![],
                     schema: r#"{"type":"string"}"#.into(),
                     deleted: false,
+                    extra: std::collections::BTreeMap::default(),
                 },
             ),
         );
@@ -839,6 +929,7 @@ mod tests {
                     references: vec![],
                     schema: r#"{"type":"long"}"#.into(),
                     deleted: false,
+                    extra: std::collections::BTreeMap::default(),
                 },
             ),
         );
@@ -892,6 +983,7 @@ mod tests {
             references: vec![],
             schema: "{\"type\":\"int\"}".into(),
             deleted: false,
+            extra: std::collections::BTreeMap::default(),
         };
         apply_record(
             &store,

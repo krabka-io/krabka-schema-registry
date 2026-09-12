@@ -5,7 +5,13 @@ pub mod record;
 pub mod topic;
 pub mod writer;
 
-use std::{future::Future, sync::Arc};
+use std::{
+    future::Future,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use krabka_units::convert::TimeExt as _;
 use parking_lot::RwLock;
@@ -50,6 +56,8 @@ pub struct KafkaStore {
     election_group: String,
     primary: RwLock<Option<watch::Receiver<crate::election::PrimaryState>>>,
     store_timeout: std::time::Duration,
+    unknown_records: Arc<AtomicU64>,
+    undecodable_records: Arc<AtomicU64>,
 }
 
 struct WriteGuard<'a> {
@@ -169,7 +177,21 @@ impl KafkaStore {
             election_group: cfg.group_id.clone(),
             primary: RwLock::new(None),
             store_timeout: cfg.runtime.store_timeout.to_std(),
+            unknown_records: r.unknown_records,
+            undecodable_records: r.undecodable_records,
         }))
+    }
+
+    #[must_use]
+    /// Number of replayed records with an unsupported key type.
+    pub fn unknown_record_count(&self) -> u64 {
+        self.unknown_records.load(Ordering::Relaxed)
+    }
+
+    #[must_use]
+    /// Number of replayed records whose known key or value could not be decoded.
+    pub fn undecodable_record_count(&self) -> u64 {
+        self.undecodable_records.load(Ordering::Relaxed)
     }
 
     /// Install the election watch before the REST server begins accepting
@@ -504,7 +526,7 @@ impl KafkaStore {
             found.ty,
             &found.schema,
             &found.references,
-            found.message_type.as_deref(),
+            (found.message_type.as_deref(), &found.extra),
         );
         let offset = self
             .writer_before(

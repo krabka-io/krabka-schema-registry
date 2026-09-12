@@ -1,6 +1,6 @@
 //! Golden schema-references-lifecycle capture harness for Krabka Schema Registry.
 //!
-//! Boots a real `mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0` container against an
+//! Boots a real `the pinned cp-schema-registry image` container against an
 //! in-process Krabka broker, with the same networking as
 //! `capture_admin_fixtures.rs`. The broker binds `0.0.0.0:9092` and advertises
 //! `host.docker.internal:9092`, while the host connects directly on
@@ -48,7 +48,8 @@ const LISTEN: &str = "0.0.0.0:9092";
 const CONTROLLER_LISTEN: &str = "0.0.0.0:9093";
 const ADVERTISED: &str = "host.docker.internal:9092";
 
-const SR_IMAGE: &str = "mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0";
+mod docker_support;
+use docker_support::SR_IMAGE;
 const SR_CONTENT_TYPE: &str = "application/vnd.schemaregistry.v1+json";
 
 // ── fixture paths ─────────────────────────────────────────────────────────────
@@ -440,6 +441,58 @@ async fn run_references_lifecycle(http: &reqwest::Client, base: &str) -> Vec<ser
         },
     )
     .await;
+
+    results.push(
+        drive(
+            http,
+            base,
+            "protobuf_disable_base_compat",
+            "PUT",
+            "/config/pb_money",
+            Some(serde_json::json!({"compatibility": "NONE"})),
+        )
+        .await,
+    );
+    results.push(
+        drive(
+            http,
+            base,
+            "protobuf_register_changed_base",
+            "POST",
+            "/subjects/pb_money/versions",
+            Some(serde_json::json!({
+                "schemaType": "PROTOBUF",
+                "schema": "syntax=\"proto3\"; package m; message Money{string cents=1;}"
+            })),
+        )
+        .await,
+    );
+    results.push(
+        drive(
+            http,
+            base,
+            "protobuf_set_referrer_backward",
+            "PUT",
+            "/config/pb_order",
+            Some(serde_json::json!({"compatibility": "BACKWARD"})),
+        )
+        .await,
+    );
+    results.push(
+        drive(
+            http,
+            base,
+            "protobuf_changed_reference_rejected",
+            "POST",
+            "/subjects/pb_order/versions",
+            Some(serde_json::json!({
+                "schemaType": "PROTOBUF",
+                "schema": "syntax=\"proto3\"; import \"money.proto\"; message Order{m.Money price=1;}",
+                "references": [{"name": "money.proto", "subject": "pb_money", "version": 2}]
+            })),
+        )
+        .await,
+    );
 
     // ── JSON ──────────────────────────────────────────────────────────────────
     run_format_lifecycle(

@@ -1,6 +1,6 @@
 //! Golden compatibility-verdict capture harness for Krabka Schema Registry slice 2.
 //!
-//! Boots a real `mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0` container against an
+//! Boots a real `the pinned cp-schema-registry image` container against an
 //! in-process Krabka broker (same networking as `capture_fixtures.rs`), then
 //! drives the compatibility check API for 7 Avro cases × 3 compatibility
 //! levels = 21 entries. The verdicts are written to:
@@ -32,7 +32,8 @@ const LISTEN: &str = "0.0.0.0:9092";
 const CONTROLLER_LISTEN: &str = "0.0.0.0:9093";
 const ADVERTISED: &str = "host.docker.internal:9092";
 
-const SR_IMAGE: &str = "mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0";
+mod docker_support;
+use docker_support::SR_IMAGE;
 const SR_CONTENT_TYPE: &str = "application/vnd.schemaregistry.v1+json";
 
 // ── fixture paths ─────────────────────────────────────────────────────────────
@@ -310,6 +311,31 @@ fn avro_cases() -> Vec<CompatCase> {
             writer: r#"{"type":"record","name":"U","fields":[{"name":"e","type":{"type":"enum","name":"E","symbols":["A","B"]}}]}"#,
             reader: r#"{"type":"record","name":"U","fields":[{"name":"e","type":{"type":"enum","name":"E","symbols":["A"]}}]}"#,
         },
+        CompatCase {
+            name: "decimal_add_default",
+            writer: r#"{"type":"record","name":"U","fields":[{"name":"amount","type":{"type":"bytes","logicalType":"decimal","precision":9,"scale":2}}]}"#,
+            reader: r#"{"type":"record","name":"U","fields":[{"name":"amount","type":{"type":"bytes","logicalType":"decimal","precision":9,"scale":2}},{"name":"x","type":"int","default":0}]}"#,
+        },
+        CompatCase {
+            name: "timestamp_millis_to_micros",
+            writer: r#"{"type":"long","logicalType":"timestamp-millis"}"#,
+            reader: r#"{"type":"long","logicalType":"timestamp-micros"}"#,
+        },
+        CompatCase {
+            name: "date_to_time_millis",
+            writer: r#"{"type":"int","logicalType":"date"}"#,
+            reader: r#"{"type":"int","logicalType":"time-millis"}"#,
+        },
+        CompatCase {
+            name: "enum_reader_default",
+            writer: r#"{"type":"enum","name":"E","symbols":["A","B"]}"#,
+            reader: r#"{"type":"enum","name":"E","symbols":["A"],"default":"A"}"#,
+        },
+        CompatCase {
+            name: "record_alias_rename",
+            writer: r#"{"type":"record","name":"Old","fields":[]}"#,
+            reader: r#"{"type":"record","name":"New","aliases":["Old"],"fields":[]}"#,
+        },
     ]
 }
 
@@ -329,8 +355,8 @@ async fn capture_avro_compat_matrix() {
 
     let matrix = run_compat_capture(&container_id).await;
 
-    // Sanity: exactly 21 entries (7 cases × 3 levels).
-    assert2::assert!(matrix.len() == 21);
+    // Sanity: exactly 36 entries (12 cases × 3 levels).
+    assert2::assert!(matrix.len() == 36);
 
     let json = serde_json::to_string_pretty(&matrix).expect("serialize matrix");
     write_compat_fixture("avro_matrix.json", &json);
