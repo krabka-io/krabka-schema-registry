@@ -159,3 +159,17 @@ jobs:
           name: rustdoc
           path: bazel-bin/crates/**/*.rustdoc
           if-no-files-found: error
+
+  # The Helm chart is plain YAML. It needs no Bazel and no Rust toolchain, so
+  # it gets its own small job.
+  helm:
+    name: helm lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
+        with:
+          version: v4.2.4
+      - run: helm lint charts/krabka-schema-registry --set bootstrapServers=localhost:9092
+      - run: helm template sr charts/krabka-schema-registry --set bootstrapServers=localhost:9092

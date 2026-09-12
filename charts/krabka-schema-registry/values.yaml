@@ -1,0 +1,57 @@
+image:
+  # This repository publishes no container image yet. The package
+  # ghcr.io/krabka-io/krabka-schema-registry does not exist at this time.
+  # Set image.repository to an image you build until the packaging job lands.
+  repository: ghcr.io/krabka-io/krabka-schema-registry
+  tag: "" # defaults to .Chart.AppVersion when empty
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+# Both override the generated resource names. Empty keeps the generated name.
+nameOverride: ""
+fullnameOverride: ""
+
+# REQUIRED for the standalone chart: bootstrap address of the Krabka broker.
+bootstrapServers: ""
+schemasTopic: "_schemas"
+schemasTopicReplicationFactor: 3
+groupId: "schema-registry"
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: "1000m"
+    memory: 512Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
+podLabels: {}
+
+serviceAccount:
+  create: true
+  name: ""
+
+service:
+  type: ClusterIP
+  port: 8081
+
+logFilter: "info"
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]

@@ -95,12 +95,28 @@ list, and every sibling's `members` is the glob `crates/*`, which it skips.
 - [Design documents](docs/design/)
 - [Style guides](docs/style_guides/README.md)
 
+## Deployment
+
+The standalone Helm chart is in
+[`charts/krabka-schema-registry`](charts/krabka-schema-registry):
+
+```sh
+helm install sr charts/krabka-schema-registry --set bootstrapServers=my-broker:9092
+```
+
+See [Deployment](docs/deploy.md) for the operator-managed alternative and for
+the security fields.
+
+The chart default image is `ghcr.io/krabka-io/krabka-schema-registry`. This
+repository does not build that image yet. Set `image.repository` to an image
+you build until a packaging job lands here.
+
 ## Not yet here
 
-The Helm chart, the apko image definition and the operator's `SchemaRegistry`
-CRD still live in [`robot-head/crabka`](https://github.com/robot-head/crabka).
-The CRD belongs to that repository's operator crate, which is not moving, so the
-packaging follows it rather than being split in half.
+The apko image definition and the operator's `SchemaRegistry` CRD still live in
+[`robot-head/crabka`](https://github.com/robot-head/crabka). The CRD belongs to
+that repository's operator crate, which is not moving, so that part of the
+packaging follows it.
 
 ## License
 

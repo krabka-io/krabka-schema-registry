@@ -180,7 +180,7 @@ The end state is a registry where executable fixtures hold the Confluent contrac
 
 **Divergence from Confluent.** No item here adds an endpoint, a header, a query parameter or an error code to the client-facing listener that `cp-schema-registry` does not define. The admin listener is a separate surface that no Confluent client reaches, and the operational endpoints M7 adds there, `/metrics` and `/readyz`, are outside this constraint. Every rule that M3, M4 and M5 add carries a verdict or a body captured from the container first. Where cp's behavior cannot be reproduced, the suite records the exception instead of a hand-written expectation.
 
-**Packaging.** The Helm chart, the apko image definition and the operator's `SchemaRegistry` CRD stay in [`robot-head/crabka`](https://github.com/robot-head/crabka). The CRD belongs to that repository's operator crate, and the operator is not moving. M7 states where they live and links to them. It does not copy them here.
+**Packaging.** The Helm chart is in this repository, at [`charts/krabka-schema-registry`](../charts/krabka-schema-registry). The apko image definition and the operator's `SchemaRegistry` CRD stay in [`robot-head/crabka`](https://github.com/robot-head/crabka). The CRD belongs to that repository's operator crate, and the operator is not moving. M7 states where those two live and links to them. It does not copy them here.
 
 **Release automation.** This repository publishes no crate. The `krabka-*` names on crates.io are published from `robot-head/crabka`, and consumers here pin by git revision.
 
