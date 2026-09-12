@@ -1,7 +1,8 @@
 image:
-  # This repository publishes no container image yet. The package
-  # ghcr.io/krabka-io/krabka-schema-registry does not exist at this time.
-  # Set image.repository to an image you build until the packaging job lands.
+  # The package ghcr.io/krabka-io/krabka-schema-registry does not exist at
+  # this time. The image recipe is in packaging/apko, but no workflow here
+  # builds or publishes it. Set image.repository to an image you build until
+  # a publishing job lands. The README says what is still missing.
   repository: ghcr.io/krabka-io/krabka-schema-registry
   tag: "" # defaults to .Chart.AppVersion when empty
   pullPolicy: IfNotPresent
