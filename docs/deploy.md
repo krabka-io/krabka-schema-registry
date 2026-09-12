@@ -74,6 +74,40 @@ helm install sr charts/krabka-schema-registry \
   --set bootstrapServers=my-broker:9092
 ```
 
+The chart renders a StatefulSet, a ClusterIP Service, and a headless Service.
+The StatefulSet gives each pod a stable hostname and subdomain, so the pod DNS
+name `<pod>.<release>-krabka-schema-registry-headless.<ns>.svc.cluster.local`
+that each pod advertises resolves. A secondary forwards every write to that
+name, so a Deployment cannot replace the StatefulSet here: the Deployment
+controller sets no pod hostname, and the record does not exist.
+
+The registry binds the REST port only after it replays the whole `_schemas`
+topic. A startup probe covers that replay and holds back the liveness probe.
+The default limit is 5 minutes. Raise `healthChecks.startupFailureThreshold`
+for a large registry or a slow broker.
+
+To reach a broker that requires SASL, TLS, or both, put the client credentials
+in a Secret and name it:
+
+```bash
+kubectl create secret generic sr-kafka-creds \
+  --from-literal=username=schema-registry \
+  --from-literal=password=…
+
+helm install sr charts/krabka-schema-registry \
+  --set bootstrapServers=my-broker:9093 \
+  --set kafkaClient.securityProtocol=SASL_SSL \
+  --set kafkaClient.sasl.mechanism=SCRAM-SHA-512 \
+  --set kafkaClient.sasl.secretRef=sr-kafka-creds \
+  --set kafkaClient.tls.caSecretName=broker-ca
+```
+
+The `kafkaClient` values match the `kafkaClient` block of the SchemaRegistry
+CRD. `sasl.secretRef` names a Secret with a `username` key and a `password`
+key. `tls.caSecretName` names a Secret with a `ca.crt` key. The chart mounts
+that key at `/etc/sr/kafka-tls/ca.crt`. The chart never takes a password as a
+value.
+
 ## Security
 
 Three fields map to mounted Secrets and SR flags: `spec.tls`,
