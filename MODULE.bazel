@@ -38,6 +38,32 @@ register_toolchains("@llvm//toolchain:all")
 bazel_dep(name = "rules_shell", version = "0.8.0")
 
 # ---------------------------------------------------------------------------
+# The container image. See //packaging.
+#
+# apko builds a bare Wolfi base from a lock file. rules_img layers the
+# Bazel-built registry binary on top of it and pushes the result. This is the
+# path krabka-io/krabka-broker uses.
+# ---------------------------------------------------------------------------
+
+# `//packaging:image` constrains itself with `@platforms//cpu:x86_64`.
+bazel_dep(name = "platforms", version = "1.1.0")
+bazel_dep(name = "rules_img", version = "0.3.20")
+bazel_dep(name = "rules_apko", version = "1.5.56")
+
+apko_toolchain = use_extension("@rules_apko//apko:extensions.bzl", "apko")
+apko_toolchain.toolchain(apko_version = "v1.2.40")
+use_repo(apko_toolchain, "apko_toolchains")
+
+register_toolchains("@apko_toolchains//:all")
+
+apk = use_extension("@rules_apko//apko:extensions.bzl", "apko")
+apk.translate_lock(
+    name = "registry_base_lock",
+    lock = "//packaging:base.apko.lock.json",
+)
+use_repo(apk, "registry_base_lock")
+
+# ---------------------------------------------------------------------------
 # Format and lint. See //tools/format and //tools/lint.
 # ---------------------------------------------------------------------------
 bazel_dep(name = "aspect_rules_lint", version = "2.7.2")

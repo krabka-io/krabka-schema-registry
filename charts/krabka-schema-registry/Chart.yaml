@@ -3,9 +3,11 @@ name: krabka-schema-registry
 description: Confluent Schema Registry-compatible service for Krabka
 type: application
 version: 0.1.0
-# appVersion tracks the crate release. It is the local default. The release job
-# overrides both version and appVersion from the workspace Cargo.toml when it
-# packages the chart, so you do not edit this by hand on release.
+# appVersion tracks the crate release, and it is also the default image tag. The
+# helm-index job in krabka-io/krabka-io.github.io sets version and appVersion
+# from the workspace Cargo.toml when it packages the chart. The `image` CI job
+# fails when this value and the workspace version differ, because `delivery`
+# publishes the image under the workspace version.
 appVersion: "0.4.0"
 kubeVersion: ">= 1.28.0-0"
 home: https://github.com/krabka-io/krabka-schema-registry
