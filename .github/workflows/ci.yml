@@ -175,3 +175,104 @@ jobs:
       - run: helm lint charts/krabka-schema-registry --set bootstrapServers=localhost:9092
       - run: helm template sr charts/krabka-schema-registry --set bootstrapServers=localhost:9092
       - run: helm unittest charts/krabka-schema-registry
+
+  # Build the container image and run it, on every pull request and push.
+  #
+  # `image_docker_test` is `manual`, so `aspect test //...` in the `ci` job
+  # skips it. This job names it. It also holds the chart and the image to one
+  # tag: the Helm index packages the chart with `appVersion` set to the
+  # workspace version in Cargo.toml, and `delivery` publishes that tag.
+  image:
+    name: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-image
+          repository-cache: true
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
+        with:
+          version: v4.2.4
+
+      # The chart's default image must be a tag that `delivery` publishes. The
+      # Helm index overwrites `appVersion` with the workspace version, so a
+      # `Chart.yaml` that says something else installs a different tag from a
+      # checkout than from https://krabka.io/charts.
+      - id: version
+        name: the chart default image is the published tag
+        run: |
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          expected="ghcr.io/krabka-io/krabka-schema-registry:${version}"
+          actual="$(helm template sr charts/krabka-schema-registry \
+            --set bootstrapServers=localhost:9092 \
+            --show-only templates/statefulset.yaml |
+            awk '$1 == "image:" { gsub(/"/, "", $2); print $2 }')"
+          if [ "${actual}" != "${expected}" ]; then
+            echo "The chart default image is ${actual}, but delivery publishes ${expected}." >&2
+            echo "Set appVersion in charts/krabka-schema-registry/Chart.yaml to ${version}." >&2
+            exit 1
+          fi
+          echo "version=${version}" >>"${GITHUB_OUTPUT}"
+
+      - name: build the image and run it
+        run: bazel test -c opt //packaging:image_binaries_test //packaging:image_docker_test
+
+  # Publish ghcr.io/krabka-io/krabka-schema-registry on a push to the default
+  # branch, after the build, the tests and the image checks pass.
+  #
+  # It pushes two tags. The commit SHA never moves. The workspace version is
+  # the tag the chart installs by default, and it moves to the newest push until
+  # the version changes. The image is content-addressed, so a registry that
+  # already holds the layers takes the manifest and skips the blobs.
+  delivery:
+    name: delivery
+    if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    needs: [ci, helm, image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    env:
+      IMAGE: ghcr.io/krabka-io/krabka-schema-registry
+      VERSION: ${{ needs.image.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-image
+          repository-cache: true
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: push
+        run: bazel run -c opt //packaging:push -- --tag "${GITHUB_SHA}" --tag "${VERSION}"
+
+      # The digest of an image is the SHA-256 of its manifest, so both tags
+      # must resolve to the digest of the manifest that this build wrote.
+      - name: the pushed tags name the built image
+        run: |
+          bazel build -c opt //packaging:image_manifest_blob
+          manifest="$(bazel cquery -c opt //packaging:image_manifest_blob --output=files)"
+          digest="sha256:$(sha256sum "${manifest}" | cut -d ' ' -f 1)"
+          for tag in "${GITHUB_SHA}" "${VERSION}"; do
+            actual="$(docker buildx imagetools inspect "${IMAGE}:${tag}" |
+              awk '$1 == "Digest:" { print $2; exit }')"
+            if [ "${actual}" != "${digest}" ]; then
+              echo "${IMAGE}:${tag} is ${actual}, but this build is ${digest}." >&2
+              exit 1
+            fi
+          done
+          echo "Published ${IMAGE}:${GITHUB_SHA} and ${IMAGE}:${VERSION} as ${digest}."

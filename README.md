@@ -107,36 +107,44 @@ helm install sr charts/krabka-schema-registry --set bootstrapServers=my-broker:9
 See [Deployment](docs/deploy.md) for the operator-managed alternative and for
 the security fields.
 
-The chart default image is `ghcr.io/krabka-io/krabka-schema-registry`. That
-package does not exist yet. Set `image.repository` to an image you build until
-a publishing job lands. The next section says what is still missing.
+The chart default image is `ghcr.io/krabka-io/krabka-schema-registry`, with the
+chart `appVersion` as its tag.
 
 ## The container image
 
-[`packaging/apko/krabka-schema-registry.yaml`](packaging/apko/krabka-schema-registry.yaml)
-is the image recipe. apko assembles the image from APK packages, so there is no
-Dockerfile. The recipe puts `/usr/bin/krabka-schema-registry` on a Wolfi base
-and runs it as uid 65532 on `x86_64` and `aarch64`.
+[`packaging/BUILD.bazel`](packaging/BUILD.bazel) builds the image with Bazel,
+the same way [`krabka-io/krabka-broker`](https://github.com/krabka-io/krabka-broker)
+does. There is no Dockerfile. apko builds a bare Wolfi base from
+[`packaging/base.apko.yaml`](packaging/base.apko.yaml) and its lockfile.
+`rules_img` adds the Bazel-built `krabka-schema-registry` binary as a layer at
+`/usr/bin/krabka-schema-registry`. The image runs that binary as uid 65532. It
+is built for `amd64` only.
 
-Two things are missing before that recipe produces an image:
+```sh
+bazel run -c opt //packaging:image_load     # load ghcr.io/krabka-io/krabka-schema-registry:dev
+docker run --rm ghcr.io/krabka-io/krabka-schema-registry:dev --help
+bazel test -c opt //packaging:image_docker_test
+```
 
-1. **No APK package.** The recipe installs a package named
-   `krabka-schema-registry`. Wolfi does not carry it. A melange recipe has to
-   build it, and the builder has to pass the resulting local repository to apko
-   with `--repository-append`. The old recipe compiled ten binaries from one
-   `cargo build` over the whole monorepo workspace. That crate set no longer
-   exists in any single repository, so the recipe is in
-   [`krabka-io/tooling`](https://github.com/krabka-io/tooling) for reference
-   only and does not run. A recipe that builds this crate alone is the
-   replacement, and nobody has written it.
-2. **No publishing workflow.** Nothing in `.github/workflows` builds or pushes
-   the image.
+The `image` CI job builds and runs the image on every pull request. It also
+checks that the chart default image uses the workspace version from
+`Cargo.toml` as its tag. On each push to the default branch, the `delivery` job
+pushes the image with two tags:
 
-This repository already builds the binary with Bazel. The sibling
-[`krabka-io/krabka-broker`](https://github.com/krabka-io/krabka-broker) shows a
-second route that skips melange: apko builds a bare Wolfi base from
-`packaging/base.apko.yaml` with a lockfile, and `rules_img` adds the
-Bazel-built binary as a layer. Which route to take is an open decision.
+- the commit SHA, which never moves
+- the workspace version, for example `0.4.0`, which is the tag that the chart
+  installs by default
+
+The Helm index at https://krabka.io/charts sets the chart `appVersion` to the
+same workspace version, so a chart from the index pulls a tag that `delivery`
+published.
+
+To change the base packages, edit `packaging/base.apko.yaml` and write the lock
+again:
+
+```sh
+bazel run @rules_apko//apko -- lock packaging/base.apko.yaml
+```
 
 ## Packaging elsewhere
 

@@ -1,0 +1,32 @@
+# The bare Wolfi base of the registry image.
+#
+# It holds a C library, CA certificates and a nonroot account. No shell and no
+# package manager. //packaging:image layers the Bazel-built
+# `krabka-schema-registry` binary on top of it.
+#
+# After you change this file, write the lock again:
+#
+#     bazel run @rules_apko//apko -- lock packaging/base.apko.yaml
+contents:
+  keyring:
+    - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+  repositories:
+    - https://packages.wolfi.dev/os
+  packages:
+    - ca-certificates-bundle
+    - glibc
+    - wolfi-baselayout
+
+accounts:
+  groups:
+    - groupname: nonroot
+      gid: 65532
+  users:
+    - username: nonroot
+      uid: 65532
+      gid: 65532
+      shell: /sbin/nologin
+  run-as: nonroot
+
+archs:
+  - amd64
