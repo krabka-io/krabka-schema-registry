@@ -15,7 +15,7 @@ use std::{
 
 use krabka_client_core::{
     ClientSecurity,
-    security::{SaslCredentials, TlsConnectorConfig},
+    security::{SaslCredentials, TlsConnectorConfig, TrustStore},
 };
 use krabka_security::{
     ClientAuthMode, Jwks, JwksHandle, ListenerProtocol, OAuthBearerValidator, SaslMechanism,
@@ -322,15 +322,18 @@ fn build_client_security(input: &SecurityCliInput) -> anyhow::Result<Option<Clie
     };
 
     let tls = if protocol.requires_tls() {
-        Some(TlsConnectorConfig {
-            trust_roots_pem: input.kafka_tls_ca.clone(),
-            server_name: input
-                .kafka_tls_server_name
-                .clone()
-                .unwrap_or_else(|| "localhost".to_string()),
-            // One-way TLS to the broker (no client cert / mTLS).
-            client_identity: None,
-        })
+        // One-way TLS to the broker (no client cert / mTLS). Without a CA
+        // file the client uses the platform trust store, as a Kafka client
+        // uses the JVM default trust store.
+        let mut tls = TlsConnectorConfig::default();
+        if let Some(ca) = &input.kafka_tls_ca {
+            tls.trust_store = TrustStore::PemFile(ca.clone());
+        }
+        tls.server_name = input
+            .kafka_tls_server_name
+            .clone()
+            .unwrap_or_else(|| "localhost".to_string());
+        Some(tls)
     } else {
         None
     };
@@ -739,9 +742,9 @@ mod tests {
         let c = s.client.expect("SSL ⇒ Some(ClientSecurity)");
         let tls = c.tls.expect("SSL requires TLS");
         assert2::assert!(c.protocol == ListenerProtocol::Ssl);
-        assert2::assert!(tls.trust_roots_pem == Some(PathBuf::from("/broker-ca.pem")));
+        assert2::assert!(tls.trust_store == TrustStore::PemFile(PathBuf::from("/broker-ca.pem")));
         assert2::assert!(tls.server_name == "broker.internal".to_string());
-        assert2::assert!(tls.client_identity == None);
+        assert2::assert!(tls.key_store == None);
         assert2::assert!(c.sasl.is_none());
     }
 
@@ -753,8 +756,8 @@ mod tests {
         });
         let tls = s.client.unwrap().tls.unwrap();
         assert2::assert!(tls.server_name == "localhost".to_string());
-        assert2::assert!(tls.trust_roots_pem == None);
-        assert2::assert!(tls.client_identity == None);
+        assert2::assert!(tls.trust_store == TrustStore::Platform);
+        assert2::assert!(tls.key_store == None);
     }
 
     #[test]
