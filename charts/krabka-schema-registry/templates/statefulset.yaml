@@ -1,0 +1,114 @@
+{{- $kafka := .Values.kafkaClient -}}
+{{- if and (hasPrefix "SASL" $kafka.securityProtocol) (not $kafka.sasl.secretRef) -}}
+{{- fail "kafkaClient.sasl.secretRef is required when kafkaClient.securityProtocol selects SASL" -}}
+{{- end -}}
+# A StatefulSet, not a Deployment: the advertised URL below is a per-pod DNS
+# name. Only the StatefulSet controller sets both `hostname` and `subdomain` on
+# each pod, and the headless Service publishes a record for that pod only when
+# both are set.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "krabka-schema-registry.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "krabka-schema-registry.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  serviceName: {{ include "krabka-schema-registry.headlessName" . }}
+  # The registry keeps no per-pod disk state, so the pods start together.
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels: {{- include "krabka-schema-registry.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "krabka-schema-registry.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}{{ toYaml . | nindent 8 }}{{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "krabka-schema-registry.serviceAccountName" . }}
+      securityContext: {{- toYaml .Values.securityContext | nindent 8 }}
+      containers:
+        - name: schema-registry
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --bootstrap-servers={{ required "bootstrapServers is required" .Values.bootstrapServers }}
+            - --listen-addr=0.0.0.0:8081
+            - --schemas-topic={{ .Values.schemasTopic }}
+            - --schemas-topic-rf={{ .Values.schemasTopicReplicationFactor }}
+            - --group-id={{ .Values.groupId }}
+            - --kafka-security-protocol={{ $kafka.securityProtocol }}
+            {{- if $kafka.sasl.secretRef }}
+            - --kafka-sasl-mechanism={{ $kafka.sasl.mechanism }}
+            {{- end }}
+            {{- if $kafka.tls.caSecretName }}
+            - --kafka-tls-ca=/etc/sr/kafka-tls/ca.crt
+            {{- end }}
+            {{- with $kafka.tls.serverNameOverride }}
+            - --kafka-tls-server-name={{ . }}
+            {{- end }}
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: SCHEMA_REGISTRY_ADVERTISED_URL
+              value: "http://$(POD_NAME).{{ include "krabka-schema-registry.headlessName" . }}.{{ .Release.Namespace }}.svc.cluster.local:8081"
+            - name: RUST_LOG
+              value: {{ .Values.logFilter | quote }}
+            {{- if $kafka.sasl.secretRef }}
+            - name: SCHEMA_REGISTRY_KAFKA_SASL_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $kafka.sasl.secretRef | quote }}
+                  key: username
+            - name: SCHEMA_REGISTRY_KAFKA_SASL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $kafka.sasl.secretRef | quote }}
+                  key: password
+            {{- end }}
+          ports:
+            - name: rest
+              containerPort: 8081
+              protocol: TCP
+          # The REST port binds only after the first `_schemas` replay ends. The
+          # startup probe holds the liveness probe back until then.
+          startupProbe:
+            tcpSocket: { port: rest }
+            periodSeconds: {{ .Values.healthChecks.startupPeriodSeconds }}
+            failureThreshold: {{ .Values.healthChecks.startupFailureThreshold }}
+          readinessProbe:
+            tcpSocket: { port: rest }
+            initialDelaySeconds: {{ .Values.healthChecks.readinessInitialDelaySeconds }}
+            periodSeconds: {{ .Values.healthChecks.readinessPeriodSeconds }}
+          livenessProbe:
+            tcpSocket: { port: rest }
+            initialDelaySeconds: {{ .Values.healthChecks.livenessInitialDelaySeconds }}
+            periodSeconds: {{ .Values.healthChecks.livenessPeriodSeconds }}
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          securityContext: {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          {{- if $kafka.tls.caSecretName }}
+          volumeMounts:
+            - name: kafka-tls
+              mountPath: /etc/sr/kafka-tls
+              readOnly: true
+          {{- end }}
+      {{- if $kafka.tls.caSecretName }}
+      volumes:
+        - name: kafka-tls
+          secret:
+            secretName: {{ $kafka.tls.caSecretName | quote }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}

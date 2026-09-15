@@ -4,7 +4,7 @@
 
 Wire the three security gaps left deferred after slice 7:
 
-1. **JWKS-backed Bearer auth** — the `crabka-security` `SignedJwsValidator` + `JwksHandle` exist but are not wired into the SR CLI or CRD; `BearerMode` is `Unsecured`-only today.
+1. **JWKS-backed Bearer auth** — the `krabka-security` `SignedJwsValidator` + `JwksHandle` exist but are not wired into the SR CLI or CRD; `BearerMode` is `Unsecured`-only today.
 2. **Secured SR→broker client** — the SR CLI already has `--kafka-*` flags for SASL/TLS, but the operator never renders them; the Kafka cluster's security is invisible to the SR Deployment.
 3. **Cert-manager serving-cert provisioning** — the SR CRD requires a user-supplied `kubernetes.io/tls` Secret today; this slice adds an `issuerRef` path that lets cert-manager provision the serving cert automatically.
 
@@ -29,13 +29,13 @@ slice 8
 └── C: Cert-Manager Certificate CRs
     ├── crates/operator/src/crd/schema_registry.rs         (issuerRef on SchemaRegistryTls)
     ├── crates/operator/src/controller/schema_registry.rs  (Certificate CR SSA + pending gate)
-    └── charts/crabka-operator/templates/clusterrole.yaml  (certificates.cert-manager.io)
+    └── charts/krabka-operator/templates/clusterrole.yaml  (certificates.cert-manager.io)
 ```
 
 The crate boundary is clear:
 
-- `crabka-schema-registry` owns the runtime: JWKS validator wiring + refresh task.
-- `crabka-operator` owns the packaging: CRD field additions + operator rendering.
+- `krabka-schema-registry` owns the runtime: JWKS validator wiring + refresh task.
+- `krabka-operator` owns the packaging: CRD field additions + operator rendering.
 
 No new crate dependencies are introduced by Parts A or B. Part C uses `kube::core::DynamicObject` (already in `kube`, already a dependency) to SSA-apply `cert-manager.io/v1 Certificate` CRs without pulling in a cert-manager Rust crate.
 
@@ -165,7 +165,7 @@ If `jwksTlsSecretName` is set, mount the Secret at `/etc/sr/jwks-tls/` and add:
 
 ### Validation
 
-New CLI unit tests in `cli.rs` for the `jwks` build path (no network — just assert `SecurityOutput.config` fields). The `tests/security.rs` integration test adds a JWKS case: spin up a minimal JWKS HTTP endpoint serving a test RS256 key pair, configure SR with `--bearer=jwks`, assert a signed JWT passes and an unsigned / wrong-iss JWT gets 401. Reuse `crabka_security::ca` test key material.
+New CLI unit tests in `cli.rs` for the `jwks` build path (no network — just assert `SecurityOutput.config` fields). The `tests/security.rs` integration test adds a JWKS case: spin up a minimal JWKS HTTP endpoint serving a test RS256 key pair, configure SR with `--bearer=jwks`, assert a signed JWT passes and an unsigned / wrong-iss JWT gets 401. Reuse `krabka_security::ca` test key material.
 
 ---
 
@@ -325,7 +325,7 @@ DNS SANs include:
 
 ### ClusterRole addition
 
-`charts/crabka-operator/templates/clusterrole.yaml` gains:
+`charts/krabka-operator/templates/clusterrole.yaml` gains:
 
 ```yaml
 - apiGroups: ["cert-manager.io"]
@@ -353,7 +353,7 @@ The operator's `ClusterRole` YAML in `deploy/` (generated or hand-maintained —
 |---|---|---|
 | CLI unit | `build_bearer("jwks", ...)` builds correct `SecurityConfig`; missing endpoint → error | `cli.rs` `mod tests` |
 | CLI unit | SASL + TLS `SecurityCliInput` → correct `ClientSecurity` (already tested; gate only) | `cli.rs` existing |
-| SR integration | JWKS: in-process `axum` server serving a hardcoded RS256 JWKS (using `crabka_security::ca` test key material); assert 200/401 for signed/unsigned/wrong-issuer tokens | `tests/security.rs` new case |
+| SR integration | JWKS: in-process `axum` server serving a hardcoded RS256 JWKS (using `krabka_security::ca` test key material); assert 200/401 for signed/unsigned/wrong-issuer tokens | `tests/security.rs` new case |
 | Operator unit | `kafka_client_sasl_ssl` renders correct args + env + mounts | `tests/reconcile_schema_registry.rs` |
 | Operator unit | `issuer_ref` path: pending-cert gate + ready-cert renders Deployment | `tests/reconcile_schema_registry.rs` |
 | CI | Existing `kind-schema-registry` e2e passes (smoke test: no regression) | `operator-e2e.yml` |
@@ -373,8 +373,8 @@ The cert-manager e2e is **optional** in this slice (cert-manager isn't installed
 | `crates/operator/src/crd/schema_registry.rs` | Modify | `BearerMode::Jwks`, `BearerAuthn` fields, `SchemaRegistryKafkaClient*`, `CertManagerIssuerRef`, `issuer_ref` on `SchemaRegistryTls` |
 | `crates/operator/src/controller/schema_registry.rs` | Modify | Render JWKS/kafka-client args+mounts; cert-manager `apply_certificate_cr` |
 | `crates/operator/tests/reconcile_schema_registry.rs` | Modify | 5 new reconciler tests |
-| `deploy/crds/crabka.io_schemaregistries.yaml` | Generated | `cargo run -p crabka-operator -- gen-crds deploy/crds` |
-| `charts/crabka-operator/templates/clusterrole.yaml` | Modify | Add `certificates.cert-manager.io` rule |
+| `deploy/crds/krabka.io_schemaregistries.yaml` | Generated | `cargo run -p krabka-operator -- gen-crds deploy/crds` |
+| `charts/krabka-operator/templates/clusterrole.yaml` | Modify | Add `certificates.cert-manager.io` rule |
 
 ---
 
@@ -382,7 +382,7 @@ The cert-manager e2e is **optional** in this slice (cert-manager isn't installed
 
 - **No backward-compat shims.** `BearerMode::Unsecured` stays as a variant (it's valid); `BearerMode::Jwks` is a new additive variant. The `SchemaRegistrySpec.kafka_client` and `SchemaRegistryTls.issuer_ref` fields are `Option` — absent = today's behavior.
 - **CRD YAML is always generated**, never hand-edited.
-- **Clippy gate:** `cargo clippy -p crabka-schema-registry --all-targets -D warnings` + `cargo clippy -p crabka-operator --all-targets -D warnings` before each commit.
+- **Clippy gate:** `cargo clippy -p krabka-schema-registry --all-targets -D warnings` + `cargo clippy -p krabka-operator --all-targets -D warnings` before each commit.
 - **`cargo fmt` before each commit.**
 - **Commit identity:** `-c user.name="Matthew Stone" -c user.email="matthew.d.stone@gmail.com"` + `Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>` trailer.
 - **cert-manager kind e2e deferred** to a follow-up slice; the reconciler unit tests are the gate for Part C.

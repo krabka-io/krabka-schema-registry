@@ -1,7 +1,7 @@
-//! Golden compatibility-verdict capture harness for Crabka Schema Registry slice 2c.
+//! Golden compatibility-verdict capture harness for Krabka Schema Registry slice 2c.
 //!
-//! Boots a real `mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0` container against an
-//! in-process Crabka broker, then drives the compatibility check API for ~47
+//! Boots a real `the pinned cp-schema-registry image` container against an
+//! in-process Krabka broker, then drives the compatibility check API for ~47
 //! JSON Schema cases × 3 compatibility levels ≈ 141 entries. Verdicts are written to:
 //!
 //!   `tests/fixtures/compat/json_matrix.json`
@@ -9,7 +9,7 @@
 //! That file is the oracle for Task 6's JSON Schema compatibility engine calibration.
 //!
 //! ```text
-//! cargo test -p crabka-schema-registry --test capture_json_fixtures -- --ignored --nocapture
+//! cargo test -p krabka-schema-registry --test capture_json_fixtures -- --ignored --nocapture
 //! ```
 //!
 //! Re-running this test regenerates the fixture file verbatim.
@@ -21,8 +21,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crabka_broker::{Broker, BrokerConfig, NodeId};
-use crabka_units::prelude::*;
+use krabka_broker::{Broker, BrokerConfig, NodeId};
+use krabka_units::prelude::*;
 
 /// The broker binds host port 9092 and cp-schema-registry reaches it via
 /// `host.docker.internal:9092` (container network) while the host connects
@@ -31,7 +31,8 @@ const LISTEN: &str = "0.0.0.0:9092";
 const CONTROLLER_LISTEN: &str = "0.0.0.0:9093";
 const ADVERTISED: &str = "host.docker.internal:9092";
 
-const SR_IMAGE: &str = "mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0";
+mod docker_support;
+use docker_support::SR_IMAGE;
 const SR_CONTENT_TYPE: &str = "application/vnd.schemaregistry.v1+json";
 
 // ── fixture paths ─────────────────────────────────────────────────────────────
@@ -53,11 +54,11 @@ fn write_compat_fixture(name: &str, body: &str) {
 
 // ── broker ────────────────────────────────────────────────────────────────────
 
-async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir) {
+async fn start_host_broker() -> (krabka_broker::BrokerHandle, tempfile::TempDir) {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("crabka_broker=info,info")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("krabka_broker=info,info")),
         )
         .with_test_writer()
         .try_init();
@@ -77,7 +78,7 @@ async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir)
         replica_lag_time_max: secs(30),
         controller_election_timeout: secs(5),
         controller_heartbeat_interval: millis(500),
-        bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+        bootstrap_mode: krabka_broker::BootstrapMode::Bootstrap,
         ..BrokerConfig::default()
     };
     let handle = Broker::start(config).await.expect("start broker");
@@ -515,17 +516,127 @@ fn json_schema_composition_cases() -> Vec<CompatCase> {
             writer: r##"{"$ref":"#/$defs/T","$defs":{"T":{"type":"integer"}}}"##,
             reader: r##"{"$ref":"#/$defs/T","$defs":{"T":{"type":"string"}}}"##,
         },
-        // 36. dependency_added: reader adds a dependentRequired constraint
+        // 36. dependency_added: reader adds a draft-07 dependency
         CompatCase {
             name: "dependency_added",
             writer: r#"{"type":"object"}"#,
-            reader: r#"{"type":"object","dependentRequired":{"a":["b"]}}"#,
+            reader: r#"{"type":"object","dependencies":{"a":["b"]}}"#,
         },
         // 37. if_then_added: reader adds if/then conditional keywords
         CompatCase {
             name: "if_then_added",
             writer: r#"{"type":"object"}"#,
             reader: r#"{"type":"object","if":{"required":["a"]},"then":{"required":["b"]}}"#,
+        },
+        CompatCase {
+            name: "inline_to_ref",
+            writer: r#"{"type":"integer"}"#,
+            reader: r##"{"$ref":"#/$defs/T","$defs":{"T":{"type":"integer"}}}"##,
+        },
+        CompatCase {
+            name: "ref_to_inline",
+            writer: r##"{"$ref":"#/$defs/T","$defs":{"T":{"type":"integer"}}}"##,
+            reader: r#"{"type":"integer"}"#,
+        },
+        CompatCase {
+            name: "closed_to_open_removed_property",
+            writer: r#"{"type":"object","additionalProperties":false,"properties":{"a":{"type":"integer"},"b":{"type":"string"}}}"#,
+            reader: r#"{"type":"object","properties":{"a":{"type":"integer"}}}"#,
+        },
+        CompatCase {
+            name: "pattern_property_covered",
+            writer: r#"{"type":"object","patternProperties":{"^x":{"type":"string"}}}"#,
+            reader: r#"{"type":"object","patternProperties":{"^x":{"type":"string"}},"properties":{"x":{"type":"string"}}}"#,
+        },
+        CompatCase {
+            name: "required_existing_with_default",
+            writer: r#"{"type":"object","properties":{"a":{"type":"string","default":""}}}"#,
+            reader: r#"{"type":"object","properties":{"a":{"type":"string","default":""}},"required":["a"]}"#,
+        },
+        CompatCase {
+            name: "required_added_closed_with_default",
+            writer: r#"{"type":"object","additionalProperties":false}"#,
+            reader: r#"{"type":"object","additionalProperties":false,"properties":{"a":{"type":"string","default":""}},"required":["a"]}"#,
+        },
+        CompatCase {
+            name: "additional_properties_narrowed",
+            writer: r#"{"type":"object"}"#,
+            reader: r#"{"type":"object","additionalProperties":{"type":"string"}}"#,
+        },
+        CompatCase {
+            name: "additional_properties_schema_changed",
+            writer: r#"{"type":"object","additionalProperties":{"type":"integer"}}"#,
+            reader: r#"{"type":"object","additionalProperties":{"type":"string"}}"#,
+        },
+        CompatCase {
+            name: "plain_widened_to_anyof",
+            writer: r#"{"type":"string"}"#,
+            reader: r#"{"anyOf":[{"type":"string"},{"type":"integer"}]}"#,
+        },
+        CompatCase {
+            name: "anyof_branch_relaxed",
+            writer: r#"{"anyOf":[{"type":"integer","maximum":5}]}"#,
+            reader: r#"{"anyOf":[{"type":"integer","maximum":10}]}"#,
+        },
+        CompatCase {
+            name: "oneof_to_anyof",
+            writer: r#"{"oneOf":[{"type":"string"}]}"#,
+            reader: r#"{"anyOf":[{"type":"string"}]}"#,
+        },
+        CompatCase {
+            name: "not_subschema_narrowed",
+            writer: r#"{"not":{"type":"number"}}"#,
+            reader: r#"{"not":{"type":"integer"}}"#,
+        },
+        CompatCase {
+            name: "second_combinator_narrowed",
+            writer: r#"{"allOf":[{"type":"object"}],"anyOf":[{"type":"string"},{"type":"integer"}]}"#,
+            reader: r#"{"allOf":[{"type":"object"}],"anyOf":[{"type":"string"}]}"#,
+        },
+        CompatCase {
+            name: "tuple_positional_type_change",
+            writer: r#"{"type":"array","items":[{"type":"integer"}]}"#,
+            reader: r#"{"type":"array","items":[{"type":"string"}]}"#,
+        },
+        CompatCase {
+            name: "items_schema_to_tuple",
+            writer: r#"{"type":"array","items":{"type":"integer"}}"#,
+            reader: r#"{"type":"array","items":[{"type":"integer"}]}"#,
+        },
+        CompatCase {
+            name: "items_tuple_to_schema",
+            writer: r#"{"type":"array","items":[{"type":"integer"}]}"#,
+            reader: r#"{"type":"array","items":{"type":"integer"}}"#,
+        },
+        CompatCase {
+            name: "unique_items_added",
+            writer: r#"{"type":"array"}"#,
+            reader: r#"{"type":"array","uniqueItems":true}"#,
+        },
+        CompatCase {
+            name: "unique_items_removed",
+            writer: r#"{"type":"array","uniqueItems":true}"#,
+            reader: r#"{"type":"array"}"#,
+        },
+        CompatCase {
+            name: "integer_to_number",
+            writer: r#"{"type":"integer"}"#,
+            reader: r#"{"type":"number"}"#,
+        },
+        CompatCase {
+            name: "number_to_integer",
+            writer: r#"{"type":"number"}"#,
+            reader: r#"{"type":"integer"}"#,
+        },
+        CompatCase {
+            name: "multiple_of_reduced",
+            writer: r#"{"type":"integer","multipleOf":4}"#,
+            reader: r#"{"type":"integer","multipleOf":2}"#,
+        },
+        CompatCase {
+            name: "multiple_of_expanded",
+            writer: r#"{"type":"integer","multipleOf":2}"#,
+            reader: r#"{"type":"integer","multipleOf":4}"#,
         },
     ]
 }

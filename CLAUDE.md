@@ -60,13 +60,13 @@ the Kafka client, and
 authorizer and telemetry crates and for the in-process broker the integration
 suites use. All three are pinned by revision in one place — the
 `[patch.crates-io]` block at the bottom of the root `Cargo.toml`. Member
-manifests declare those crates as ordinary `crabka-x = "0.4.0"` requirements;
+manifests declare those crates as ordinary `krabka-x = "0.4.0"` requirements;
 the patch is what redirects them at the git checkouts. To move to a newer
 sibling, change the revision there, re-run `cargo generate-lockfile`, and commit
 both files.
 
-`crabka-schema-serde` is patched to its own path in that same block. This
-workspace builds it, and `crabka-broker` depends on it too, so without the patch
+`krabka-schema-serde` is patched to its own path in that same block. This
+workspace builds it, and `krabka-broker` depends on it too, so without the patch
 the graph would carry two copies of one crate from two sources.
 
 `MODULE.bazel` additionally names each sibling crate's directory. rules_rs finds
@@ -141,6 +141,6 @@ shape.
 
 ## Releases
 
-This repository has no release automation. The `crabka-*` crates.io names are
+This repository has no release automation. The `krabka-*` crates.io names are
 still published from [`robot-head/crabka`](https://github.com/robot-head/crabka);
 consumers here pin by git revision.

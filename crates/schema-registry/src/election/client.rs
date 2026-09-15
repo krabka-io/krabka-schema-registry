@@ -5,15 +5,15 @@
 //! `client-consumer`'s coordinator loop without consumer semantics.
 
 use bytes::Bytes;
-use crabka_client_core::{Client, ClientSecurity};
-use crabka_protocol::owned::{
+use krabka_client_core::{Client, ClientSecurity};
+use krabka_protocol::owned::{
     find_coordinator_request::FindCoordinatorRequest,
     heartbeat_request::HeartbeatRequest,
     join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol},
     leave_group_request::{LeaveGroupRequest, MemberIdentity},
     sync_group_request::{SyncGroupRequest, SyncGroupRequestAssignment},
 };
-use crabka_units::prelude::*;
+use krabka_units::prelude::*;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
@@ -26,7 +26,7 @@ use super::{
 };
 use crate::config::RegistryRuntimeConfig;
 
-// Kafka group error codes (defined locally to avoid a crabka-broker dependency).
+// Kafka group error codes (defined locally to avoid a krabka-broker dependency).
 const NONE: i16 = 0;
 const COORDINATOR_LOAD_IN_PROGRESS: i16 = 14;
 const COORDINATOR_NOT_AVAILABLE: i16 = 15;

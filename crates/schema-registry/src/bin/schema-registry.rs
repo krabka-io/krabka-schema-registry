@@ -1,8 +1,8 @@
-//! crabka-schema-registry: Confluent Schema Registry-compatible REST service.
+//! krabka-schema-registry: Confluent Schema Registry-compatible REST service.
 //!
 //! This binary is a thin `clap` → lib shim. It parses CLI flags into an
 //! [`Args`], maps them into a [`SecurityCliInput`], and gives that to
-//! [`crabka_schema_registry::cli::build_security`] for validation and assembly.
+//! [`krabka_schema_registry::cli::build_security`] for validation and assembly.
 //! That code stays in the lib so it is unit-testable. The remaining glue lives
 //! here: serve wiring, election, and the ACL-refresh task.
 
@@ -10,14 +10,14 @@
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{net::SocketAddr, path::PathBuf, str::FromStr, sync::Arc};
 
 use clap::Parser;
-use crabka_client_admin::AdminClient;
-use crabka_client_core::{
+use krabka_client_admin::AdminClient;
+use krabka_client_core::{
     ClientFrameMax, ConnectionDispatchQueueCapacity, DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
 };
-use crabka_schema_registry::{
+use krabka_schema_registry::{
     auth::{AuthState, basic::BasicAuthStore},
     authz::SchemaRegistryAuthz,
     cli::SecurityCliInput,
@@ -29,20 +29,20 @@ use crabka_schema_registry::{
         serve::{serve_http, serve_https},
     },
 };
-use crabka_units::{parse, prelude::*};
+use krabka_units::{parse, prelude::*};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-#[derive(Debug, Parser)]
+#[derive(Parser)]
 #[command(
-    name = "crabka-schema-registry",
+    name = "krabka-schema-registry",
     version,
-    about = "Confluent Schema Registry-compatible service for Crabka"
+    about = "Confluent Schema Registry-compatible service for Krabka"
 )]
 struct Args {
     #[command(flatten)]
-    profiling: crabka_telemetry::profiling::ProfilingConfig,
-    #[arg(long, env = "CRABKA_BOOTSTRAP_SERVERS")]
+    profiling: krabka_telemetry::profiling::ProfilingConfig,
+    #[arg(long, env = "KRABKA_BOOTSTRAP_SERVERS")]
     bootstrap_servers: String,
     #[arg(
         long,
@@ -64,8 +64,13 @@ struct Args {
         default_value = "0.0.0.0:8081"
     )]
     listen_addr: SocketAddr,
-    #[arg(long, env = "CRABKA_ADMIN_LISTEN_ADDR", default_value = "0.0.0.0:9404")]
-    admin_listen_addr: SocketAddr,
+    /// Admin listener address, or `off` to disable profiling endpoints.
+    #[arg(
+        long,
+        env = "KRABKA_ADMIN_LISTEN_ADDR",
+        default_value = "127.0.0.1:9404"
+    )]
+    admin_listen_addr: AdminListenAddr,
     #[arg(
         long,
         env = "SCHEMA_REGISTRY_SCHEMAS_TOPIC",
@@ -77,7 +82,7 @@ struct Args {
     #[arg(
         long,
         env = "SCHEMA_REGISTRY_CLIENT_ID",
-        default_value = "crabka-schema-registry"
+        default_value = "krabka-schema-registry"
     )]
     client_id: String,
     #[arg(long, env = "SCHEMA_REGISTRY_ADVERTISED_URL")]
@@ -145,6 +150,13 @@ struct Args {
         value_parser = parse::positive_byte_size
     )]
     store_reader_fetch_max: Option<ByteSize>,
+    /// Maximum duration of one schema-store operation (`60s`).
+    #[arg(
+        long = "kafkastore-timeout",
+        env = "SCHEMA_REGISTRY_KAFKASTORE_TIMEOUT_MS",
+        value_parser = positive_millis_time
+    )]
+    store_timeout: Option<Time>,
     /// `_schemas` topic-creation timeout, with a unit (`15s`).
     #[arg(
         long,
@@ -155,7 +167,7 @@ struct Args {
     /// Largest request body forwarded to the primary, with a unit (`16MiB`).
     #[arg(
         long,
-        env = "CRABKA_SCHEMA_REGISTRY_FORWARD_MAX_BODY",
+        env = "KRABKA_SCHEMA_REGISTRY_FORWARD_MAX_BODY",
         value_parser = parse::positive_byte_size
     )]
     forward_max_body: Option<ByteSize>,
@@ -176,6 +188,9 @@ struct Args {
     /// Reject unauthenticated (anonymous) requests with 401.
     #[arg(long, env = "SCHEMA_REGISTRY_REQUIRE_AUTH", default_value_t = false)]
     require_auth: bool,
+    /// Shared credential for authenticated secondary-to-primary forwards.
+    #[arg(long, env = "SCHEMA_REGISTRY_FORWARD_SECRET")]
+    forward_secret: Option<String>,
     /// `WWW-Authenticate: basic realm="<realm>"` realm advertised on 401. The
     /// default matches the realm `cp-schema-registry` emits under the standard
     /// `PropertyFileLoginModule` BASIC setup, which is the JAAS entry name.
@@ -191,8 +206,20 @@ struct Args {
     basic_auth_file: Option<PathBuf>,
     /// Inline Basic credential as `user:cred` (repeatable). Same cred format as
     /// `--basic-auth-file`. Enables Basic auth even without a file.
-    #[arg(long = "basic-user", value_name = "USER:CRED")]
+    #[arg(
+        long = "basic-user",
+        env = "SCHEMA_REGISTRY_BASIC_USERS",
+        value_name = "USER:CRED",
+        value_delimiter = '\n'
+    )]
     basic_users: Vec<String>,
+    /// Role permitted to authenticate with Basic (repeatable).
+    #[arg(
+        long = "auth-roles",
+        env = "SCHEMA_REGISTRY_AUTH_ROLES",
+        value_delimiter = ','
+    )]
+    auth_roles: Vec<String>,
 
     // ── Bearer (OAuth) ──────────────────────────────────────────────────────
     /// Bearer-token mode: `off` | `unsecured`. `unsecured` accepts unsigned
@@ -255,7 +282,12 @@ struct Args {
     #[arg(long, env = "SCHEMA_REGISTRY_AUTHZ", default_value_t = false)]
     authz: bool,
     /// Super-user principal name that bypasses ACL checks (repeatable).
-    #[arg(long = "super-user", value_name = "NAME")]
+    #[arg(
+        long = "super-user",
+        env = "SCHEMA_REGISTRY_SUPER_USERS",
+        value_name = "NAME",
+        value_delimiter = '\n'
+    )]
     super_users: Vec<String>,
     /// ACL-cache refresh interval, with a unit (`30s`).
     #[arg(
@@ -288,6 +320,9 @@ struct Args {
     /// SASL password (PLAIN / SCRAM).
     #[arg(long, env = "SCHEMA_REGISTRY_KAFKA_SASL_PASSWORD")]
     kafka_sasl_password: Option<String>,
+    /// File containing the SASL password (PLAIN / SCRAM).
+    #[arg(long, env = "SCHEMA_REGISTRY_KAFKA_SASL_PASSWORD_FILE")]
+    kafka_sasl_password_file: Option<PathBuf>,
     /// GSSAPI keytab containing the client principal's long-term key.
     #[arg(long, env = "SCHEMA_REGISTRY_KAFKA_SASL_KEYTAB_PATH")]
     kafka_sasl_keytab_path: Option<PathBuf>,
@@ -328,29 +363,31 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let runtime = args.runtime_config()?;
 
-    let telemetry = crabka_telemetry::init(
-        crabka_telemetry::OtlpConfig::from_env(
+    let telemetry = krabka_telemetry::init(
+        krabka_telemetry::OtlpConfig::from_env(
             |k| std::env::var(k).ok(),
-            "crabka-schema-registry",
+            "krabka-schema-registry",
             env!("CARGO_PKG_VERSION"),
-            "crabka-schema-registry",
+            "krabka-schema-registry",
         )?,
-        "crabka_schema_registry=info,info",
+        "krabka_schema_registry=info,info",
         "info",
-        "crabka-schema-registry",
+        "krabka-schema-registry",
     )?;
 
-    crabka_telemetry::profiling::serve_admin_with_config(
-        args.admin_listen_addr,
-        axum::Router::new(),
-        args.profiling.clone(),
-    )
-    .await?;
+    if let Some(admin_listen_addr) = args.admin_listen_addr.0 {
+        krabka_telemetry::profiling::serve_admin_with_config(
+            admin_listen_addr,
+            axum::Router::new(),
+            args.profiling.clone(),
+        )
+        .await?;
+    }
 
-    let crabka_schema_registry::cli::SecurityOutput {
+    let krabka_schema_registry::cli::SecurityOutput {
         config: security,
         jwks_handle,
-    } = crabka_schema_registry::cli::build_security(&args.security_input())?;
+    } = krabka_schema_registry::cli::build_security(&args.security_input())?;
     let cfg = RegistryConfig {
         bootstrap: args.bootstrap_servers.clone(),
         schemas_topic: args.schemas_topic.clone(),
@@ -372,10 +409,39 @@ async fn main() -> anyhow::Result<()> {
         tls = cfg.security.tls.is_some(),
         require_auth = cfg.security.require_auth,
         authz = cfg.security.authz.as_ref().is_some_and(|a| a.enabled),
-        "crabka-schema-registry starting"
+        "krabka-schema-registry starting"
     );
 
     let shutdown = CancellationToken::new();
+    let (audit, mut audit_events) = krabka_audit::AuditLog::new(1024);
+    tokio::spawn(async move {
+        let product = krabka_audit::ProductInfo {
+            vendor_name: "Krabka".into(),
+            name: "Schema Registry".into(),
+            version: env!("CARGO_PKG_VERSION").into(),
+        };
+        while let Some(event) = audit_events.recv().await {
+            let record = krabka_audit::AuditRecord::from_event(&event, &product);
+            let body = String::from_utf8_lossy(&record.value);
+            let value = serde_json::from_slice::<serde_json::Value>(&record.value)
+                .unwrap_or(serde_json::Value::Null);
+            tracing::info!(
+                event_class = record.class.as_header(),
+                class_uid = value["class_uid"].as_i64().unwrap_or_default(),
+                status_id = value["status_id"].as_i64().unwrap_or_default(),
+                principal = value.pointer("/actor/user/name").and_then(serde_json::Value::as_str).unwrap_or_default(),
+                auth_protocol = value["auth_protocol"].as_str().unwrap_or_default(),
+                source_ip = value.pointer("/src_endpoint/ip").and_then(serde_json::Value::as_str).unwrap_or_default(),
+                operation = value["operation"].as_str().or_else(|| value.pointer("/api/operation").and_then(serde_json::Value::as_str)).unwrap_or_default(),
+                resource_type = value.pointer("/resources/0/type").and_then(serde_json::Value::as_str).unwrap_or_default(),
+                resource_name = value.pointer("/resources/0/name").and_then(serde_json::Value::as_str).unwrap_or_default(),
+                product = value.pointer("/metadata/product/name").and_then(serde_json::Value::as_str).unwrap_or_default(),
+                product_version = value.pointer("/metadata/product/version").and_then(serde_json::Value::as_str).unwrap_or_default(),
+                audit_record = %body,
+                "schema registry security audit"
+            );
+        }
+    });
 
     // ── JWKS refresh task (bearer=jwks only) ────────────────────────────────
     if let Some(jwks) = jwks_handle {
@@ -386,7 +452,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let store = KafkaStore::start(&cfg, shutdown.clone()).await?;
-    let primary = crabka_schema_registry::election::Election::start(&cfg, shutdown.clone()).await?;
+    let primary = krabka_schema_registry::election::Election::start(&cfg, shutdown.clone()).await?;
     store.install_primary(primary.clone());
 
     // ── Authentication state ────────────────────────────────────────────────
@@ -400,23 +466,29 @@ async fn main() -> anyhow::Result<()> {
     };
     let bearer = cfg.security.bearer.as_ref().map(|b| b.validator.clone());
     let auth = AuthState {
+        audit: audit.clone(),
         basic,
         bearer,
         require_auth: cfg.security.require_auth,
         realm: cfg.security.realm.clone(),
+        forward_secret: cfg.security.forward_secret.clone(),
     };
 
     // ── Authorization (+ ACL refresh task) ──────────────────────────────────
     let authz = match &cfg.security.authz {
         Some(a) if a.enabled => {
-            let az = Arc::new(SchemaRegistryAuthz::new(a.super_users.clone(), true));
+            let az = Arc::new(SchemaRegistryAuthz::with_audit(
+                a.super_users.clone(),
+                true,
+                audit.clone(),
+            ));
             let admin = AdminClient::connect_with_options(
                 &split_bootstrap(&cfg.bootstrap),
-                crabka_client_core::ConnectionOptions {
-                    dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
+                krabka_client_core::ConnectionOptions {
+                    dns_timeout: krabka_client_core::ClientDnsTimeout::default(),
                     connect_timeout: secs(5),
                     request_timeout: secs(30),
-                    client_id: "crabka-operator".to_owned(),
+                    client_id: "krabka-operator".to_owned(),
                     dispatch_queue_capacity: cfg.runtime.client_dispatch_queue_capacity,
                     frame_max: cfg.runtime.client_frame_max,
                     security: cfg.security.client.clone().map(Box::new),
@@ -441,6 +513,7 @@ async fn main() -> anyhow::Result<()> {
         http: reqwest::Client::new(),
         node_id: cfg.advertised_url.clone(),
         forward_max_body: cfg.runtime.forward_max_body,
+        forward_secret: cfg.security.forward_secret.clone(),
     };
     let layers = SecurityLayers {
         auth,
@@ -467,6 +540,32 @@ async fn main() -> anyhow::Result<()> {
     }
     telemetry.shutdown();
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AdminListenAddr(Option<SocketAddr>);
+
+fn positive_millis_time(value: &str) -> Result<Time, krabka_units::parse::ParseError> {
+    if value.chars().all(|character| character.is_ascii_digit()) {
+        parse::positive_time(&format!("{value}ms"))
+    } else {
+        parse::positive_time(value)
+    }
+}
+
+impl FromStr for AdminListenAddr {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.eq_ignore_ascii_case("off") {
+            Ok(Self(None))
+        } else {
+            value
+                .parse()
+                .map(|address| Self(Some(address)))
+                .map_err(|error: std::net::AddrParseError| error.to_string())
+        }
+    }
 }
 
 impl Args {
@@ -500,6 +599,7 @@ impl Args {
             store_reader_fetch_max: self
                 .store_reader_fetch_max
                 .unwrap_or(defaults.store_reader_fetch_max),
+            store_timeout: self.store_timeout.unwrap_or(defaults.store_timeout),
             schemas_topic_create_timeout: self
                 .schemas_topic_create_timeout
                 .unwrap_or(defaults.schemas_topic_create_timeout),
@@ -517,13 +617,15 @@ impl Args {
     /// Map the parsed clap flags into the clap-free [`SecurityCliInput`] that
     /// the lib validates and assembles. This method only moves fields. The
     /// security semantics live in
-    /// [`crabka_schema_registry::cli::build_security`].
+    /// [`krabka_schema_registry::cli::build_security`].
     fn security_input(&self) -> SecurityCliInput {
         SecurityCliInput {
             require_auth: self.require_auth,
+            forward_secret: self.forward_secret.clone(),
             realm: self.realm.clone(),
             basic_auth_file: self.basic_auth_file.clone(),
             basic_users: self.basic_users.clone(),
+            auth_roles: self.auth_roles.clone(),
             bearer: self.bearer.clone(),
             bearer_principal_claim: self.bearer_principal_claim.clone(),
             jwks_endpoint_uri: self.bearer_jwks_endpoint_uri.clone(),
@@ -543,6 +645,7 @@ impl Args {
             kafka_sasl_mechanism: self.kafka_sasl_mechanism.clone(),
             kafka_sasl_username: self.kafka_sasl_username.clone(),
             kafka_sasl_password: self.kafka_sasl_password.clone(),
+            kafka_sasl_password_file: self.kafka_sasl_password_file.clone(),
             kafka_sasl_keytab_path: self.kafka_sasl_keytab_path.clone(),
             kafka_sasl_client_principal: self.kafka_sasl_client_principal.clone(),
             kafka_sasl_service_name: Some(self.kafka_sasl_service_name.clone()),
@@ -565,7 +668,7 @@ fn parse_client_frame_max(value: &str) -> Result<ByteSize, String> {
 }
 
 fn parse_compatibility_level(value: &str) -> Result<String, String> {
-    crabka_schema_registry::compat::CompatibilityLevel::try_parse(value)
+    krabka_schema_registry::compat::CompatibilityLevel::try_parse(value)
         .map(|_| value.to_owned())
         .ok_or_else(|| "invalid compatibility level".to_owned())
 }
@@ -592,10 +695,10 @@ fn split_bootstrap(bootstrap: &str) -> Vec<String> {
 /// It fetches immediately on startup, then once per `jwks.refresh`. The shared
 /// `CancellationToken` cancels it.
 async fn run_jwks_refresher(
-    jwks: crabka_schema_registry::cli::JwksHandleForRefresh,
+    jwks: krabka_schema_registry::cli::JwksHandleForRefresh,
     cancel: CancellationToken,
 ) {
-    use crabka_security::Jwks;
+    use krabka_security::Jwks;
 
     let client = build_jwks_client(jwks.ca_path.as_ref()).unwrap_or_else(|e| {
         tracing::error!(error = %e, "JWKS client build failed; using default TLS roots");
@@ -652,18 +755,22 @@ mod tests {
 
     use assert2::assert;
     use clap::Parser;
-    use crabka_client_core::SaslCredentials;
-    use crabka_schema_registry::{cli::build_security, config::RegistryRuntimeConfig};
-    use crabka_units::{bytes, prelude::*};
+    use krabka_client_core::SaslCredentials;
+    use krabka_schema_registry::{cli::build_security, config::RegistryRuntimeConfig};
+    use krabka_units::{bytes, prelude::*};
 
-    use super::Args;
+    use super::{AdminListenAddr, Args};
 
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     #[test]
     fn gssapi_cli_parses_and_builds_broker_credentials() {
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("environment lock");
         let args = Args::try_parse_from([
-            "crabka-schema-registry",
+            "krabka-schema-registry",
             "--bootstrap-servers=localhost:9092",
             "--kafka-security-protocol=SASL_PLAINTEXT",
             "--kafka-sasl-mechanism=GSSAPI",
@@ -696,9 +803,62 @@ mod tests {
     }
 
     #[test]
+    fn auth_values_and_sasl_password_file_parse_from_environment() {
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("environment lock");
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "broker-secret\n").unwrap();
+        temp_env::with_vars(
+            [
+                (
+                    "SCHEMA_REGISTRY_BASIC_USERS",
+                    Some("alice:pw,admin\nbob:other,user"),
+                ),
+                ("SCHEMA_REGISTRY_AUTH_ROLES", Some("admin,developer")),
+                (
+                    "SCHEMA_REGISTRY_SUPER_USERS",
+                    Some("root\nCN=operator,O=Example"),
+                ),
+                (
+                    "SCHEMA_REGISTRY_KAFKA_SASL_PASSWORD_FILE",
+                    file.path().to_str(),
+                ),
+            ],
+            || {
+                let args = Args::try_parse_from([
+                    "krabka-schema-registry",
+                    "--bootstrap-servers=localhost:9092",
+                    "--kafka-security-protocol=SASL_PLAINTEXT",
+                    "--kafka-sasl-username=registry",
+                ])
+                .unwrap();
+                assert!(args.basic_users == ["alice:pw,admin", "bob:other,user"]);
+                assert!(args.auth_roles == ["admin", "developer"]);
+                assert!(args.super_users == ["root", "CN=operator,O=Example"]);
+                assert!(args.kafka_sasl_password_file.as_deref() == Some(file.path()));
+                let client = build_security(&args.security_input())
+                    .unwrap()
+                    .config
+                    .client
+                    .unwrap();
+                assert!(matches!(
+                    client.sasl,
+                    Some(SaslCredentials::Plain { password, .. }) if password == "broker-secret"
+                ));
+            },
+        );
+    }
+
+    #[test]
     fn client_resource_policy_parses_defaults_and_overrides() {
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("environment lock");
         let defaults = Args::try_parse_from([
-            "crabka-schema-registry",
+            "krabka-schema-registry",
             "--bootstrap-servers=localhost:9092",
             "--admin-listen-addr=0.0.0.0:9404",
         ])
@@ -707,7 +867,7 @@ mod tests {
         assert!(defaults.client_frame_max == mebibytes(100));
 
         let custom = Args::try_parse_from([
-            "crabka-schema-registry",
+            "krabka-schema-registry",
             "--bootstrap-servers=localhost:9092",
             "--admin-listen-addr=0.0.0.0:9404",
             "--client-dispatch-queue-capacity=7",
@@ -726,7 +886,7 @@ mod tests {
         ] {
             assert!(
                 Args::try_parse_from([
-                    "crabka-schema-registry",
+                    "krabka-schema-registry",
                     "--bootstrap-servers=localhost:9092",
                     "--admin-listen-addr=0.0.0.0:9404",
                     invalid,
@@ -739,6 +899,10 @@ mod tests {
     #[test]
     fn client_resource_policy_reads_environment_and_prefers_cli() {
         const CHILD: &str = "SCHEMA_REGISTRY_CLIENT_RESOURCE_POLICY_CHILD";
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("environment lock");
 
         if std::env::var_os(CHILD).is_none() {
             let status =
@@ -757,7 +921,7 @@ mod tests {
         }
 
         let from_env = Args::try_parse_from([
-            "crabka-schema-registry",
+            "krabka-schema-registry",
             "--bootstrap-servers=localhost:9092",
             "--admin-listen-addr=0.0.0.0:9404",
         ])
@@ -766,7 +930,7 @@ mod tests {
         assert!(from_env.client_frame_max == kibibytes(32));
 
         let from_cli = Args::try_parse_from([
-            "crabka-schema-registry",
+            "krabka-schema-registry",
             "--bootstrap-servers=localhost:9092",
             "--admin-listen-addr=0.0.0.0:9404",
             "--client-dispatch-queue-capacity=9",
@@ -777,8 +941,8 @@ mod tests {
         assert!(from_cli.client_frame_max == kibibytes(64));
     }
 
-    const CLEAN_RUNTIME_ENV: [(&str, Option<&str>); 15] = [
-        ("CRABKA_ADMIN_LISTEN_ADDR", None),
+    const CLEAN_RUNTIME_ENV: [(&str, Option<&str>); 16] = [
+        ("KRABKA_ADMIN_LISTEN_ADDR", None),
         ("SCHEMA_REGISTRY_SCHEMAS_TOPIC_RF", None),
         ("SCHEMA_REGISTRY_BEARER_JWKS_REFRESH", None),
         ("SCHEMA_REGISTRY_ACL_REFRESH", None),
@@ -789,8 +953,9 @@ mod tests {
         ("SCHEMA_REGISTRY_STORE_READER_RETRY_BACKOFF", None),
         ("SCHEMA_REGISTRY_STORE_READER_FETCH_MAX_WAIT", None),
         ("SCHEMA_REGISTRY_STORE_READER_FETCH_MAX", None),
+        ("SCHEMA_REGISTRY_KAFKASTORE_TIMEOUT_MS", None),
         ("SCHEMA_REGISTRY_SCHEMAS_TOPIC_CREATE_TIMEOUT", None),
-        ("CRABKA_SCHEMA_REGISTRY_FORWARD_MAX_BODY", None),
+        ("KRABKA_SCHEMA_REGISTRY_FORWARD_MAX_BODY", None),
         ("SCHEMA_REGISTRY_DEFAULT_COMPATIBILITY_LEVEL", None),
         ("SCHEMA_REGISTRY_DEFAULT_MODE", None),
     ];
@@ -803,16 +968,16 @@ mod tests {
             .expect("environment lock");
 
         for environment in ["127.0.0.1:9500", "not-an-address"] {
-            temp_env::with_var("CRABKA_ADMIN_LISTEN_ADDR", Some(environment), || {
+            temp_env::with_var("KRABKA_ADMIN_LISTEN_ADDR", Some(environment), || {
                 let args = Args::try_parse_from([
-                    "crabka-schema-registry",
+                    "krabka-schema-registry",
                     "--bootstrap-servers=localhost:9092",
                     "--admin-listen-addr=127.0.0.1:9600",
                 ])
                 .expect("valid CLI address overrides environment");
                 assert!(
-                    args.admin_listen_addr
-                        == "127.0.0.1:9600".parse().expect("parse expected address")
+                    args.admin_listen_addr.0
+                        == Some("127.0.0.1:9600".parse().expect("parse expected address"))
                 );
             });
         }
@@ -842,7 +1007,7 @@ mod tests {
         for value in zero_cases {
             assert!(
                 Args::try_parse_from([
-                    "crabka-schema-registry",
+                    "krabka-schema-registry",
                     "--bootstrap-servers=localhost:9092",
                     value,
                 ])
@@ -858,7 +1023,7 @@ mod tests {
         for value in unitless_cases {
             assert!(
                 Args::try_parse_from([
-                    "crabka-schema-registry",
+                    "krabka-schema-registry",
                     "--bootstrap-servers=localhost:9092",
                     value,
                 ])
@@ -867,7 +1032,7 @@ mod tests {
         }
 
         let args = Args::try_parse_from([
-            "crabka-schema-registry",
+            "krabka-schema-registry",
             "--bootstrap-servers=localhost:9092",
             "--schemas-topic-rf=4",
             "--bearer-jwks-refresh=60001ms",
@@ -879,6 +1044,7 @@ mod tests {
             "--store-reader-retry-backoff=251ms",
             "--store-reader-fetch-max-wait=501ms",
             "--store-reader-fetch-max=1048577B",
+            "--kafkastore-timeout=60001ms",
             "--schemas-topic-create-timeout=15001ms",
             "--forward-max-body=16777217B",
             "--default-compatibility-level=FULL",
@@ -889,8 +1055,8 @@ mod tests {
             args.runtime_config().expect("validate runtime")
                 == RegistryRuntimeConfig {
                     client_dispatch_queue_capacity:
-                        crabka_client_core::ConnectionDispatchQueueCapacity::default(),
-                    client_frame_max: crabka_client_core::ClientFrameMax::default(),
+                        krabka_client_core::ConnectionDispatchQueueCapacity::default(),
+                    client_frame_max: krabka_client_core::ClientFrameMax::default(),
                     election_session_timeout: millis(11_000),
                     election_rebalance_timeout: millis(32_000),
                     election_heartbeat_interval: millis(3_001),
@@ -898,6 +1064,7 @@ mod tests {
                     store_reader_retry_backoff: millis(251),
                     store_reader_fetch_max_wait: millis(501),
                     store_reader_fetch_max: bytes(1_048_577),
+                    store_timeout: millis(60_001),
                     schemas_topic_create_timeout: millis(15_001),
                     forward_max_body: bytes(16_777_217),
                     default_compatibility_level: "FULL".into(),
@@ -907,7 +1074,7 @@ mod tests {
 
         temp_env::with_vars(CLEAN_RUNTIME_ENV, || {
             let defaults = Args::try_parse_from([
-                "crabka-schema-registry",
+                "krabka-schema-registry",
                 "--bootstrap-servers=localhost:9092",
             ])
             .expect("parse defaults");
@@ -917,13 +1084,13 @@ mod tests {
                     defaults.schemas_topic_rf.into_value(),
                     defaults.acl_refresh,
                     defaults.bearer_jwks_refresh,
-                    defaults.admin_listen_addr,
+                    defaults.admin_listen_addr.0,
                 ) == (
                     RegistryRuntimeConfig::default(),
                     3,
                     secs(30),
                     None,
-                    "0.0.0.0:9404".parse().expect("parse expected address"),
+                    Some("127.0.0.1:9404".parse().expect("parse expected address")),
                 )
             );
 
@@ -932,7 +1099,7 @@ mod tests {
                 Some("12000ms"),
                 || {
                     let from_env = Args::try_parse_from([
-                        "crabka-schema-registry",
+                        "krabka-schema-registry",
                         "--bootstrap-servers=localhost:9092",
                     ])
                     .expect("parse environment");
@@ -945,7 +1112,7 @@ mod tests {
                     );
 
                     let from_cli = Args::try_parse_from([
-                        "crabka-schema-registry",
+                        "krabka-schema-registry",
                         "--bootstrap-servers=localhost:9092",
                         "--election-session-timeout=13000ms",
                     ])
@@ -960,11 +1127,11 @@ mod tests {
                 },
             );
             temp_env::with_var(
-                "CRABKA_SCHEMA_REGISTRY_FORWARD_MAX_BODY",
+                "KRABKA_SCHEMA_REGISTRY_FORWARD_MAX_BODY",
                 Some("20000000B"),
                 || {
                     let from_env = Args::try_parse_from([
-                        "crabka-schema-registry",
+                        "krabka-schema-registry",
                         "--bootstrap-servers=localhost:9092",
                     ])
                     .expect("parse forwarding limit environment");
@@ -977,7 +1144,7 @@ mod tests {
                     );
 
                     let from_cli = Args::try_parse_from([
-                        "crabka-schema-registry",
+                        "krabka-schema-registry",
                         "--bootstrap-servers=localhost:9092",
                         "--forward-max-body=21000000B",
                     ])
@@ -1002,7 +1169,7 @@ mod tests {
                 ],
                 || {
                     let from_cli = Args::try_parse_from([
-                        "crabka-schema-registry",
+                        "krabka-schema-registry",
                         "--bootstrap-servers=localhost:9092",
                         "--store-reader-fetch-max-wait=602ms",
                         "--store-reader-fetch-max=1048579B",
@@ -1014,6 +1181,28 @@ mod tests {
                     assert!(from_cli.store_reader_fetch_max_wait == millis(602));
                     assert!(from_cli.store_reader_fetch_max == bytes(1_048_579));
                     assert!(from_cli.schemas_topic_create_timeout == millis(16_002));
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn confluent_kafkastore_timeout_environment_is_bare_milliseconds() {
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("environment lock");
+        temp_env::with_vars(CLEAN_RUNTIME_ENV, || {
+            temp_env::with_var(
+                "SCHEMA_REGISTRY_KAFKASTORE_TIMEOUT_MS",
+                Some("60002"),
+                || {
+                    let args = Args::try_parse_from([
+                        "krabka-schema-registry",
+                        "--bootstrap-servers=localhost:9092",
+                    ])
+                    .expect("parse Confluent millisecond environment value");
+                    assert_eq!(args.runtime_config().unwrap().store_timeout, millis(60_002));
                 },
             );
         });
@@ -1035,7 +1224,7 @@ mod tests {
             "--schemas-topic-create-timeout=2147483648ms",
         ] {
             let args = Args::try_parse_from([
-                "crabka-schema-registry",
+                "krabka-schema-registry",
                 "--bootstrap-servers=localhost:9092",
                 value,
             ])
@@ -1047,7 +1236,7 @@ mod tests {
         }
 
         let boundary = Args::try_parse_from([
-            "crabka-schema-registry",
+            "krabka-schema-registry",
             "--bootstrap-servers=localhost:9092",
             "--store-reader-fetch-max-wait=2147483647ms",
             "--store-reader-fetch-max=2147483647B",
@@ -1057,10 +1246,21 @@ mod tests {
         assert!(boundary.runtime_config().is_ok());
 
         let defaults = Args::try_parse_from([
-            "crabka-schema-registry",
+            "krabka-schema-registry",
             "--bootstrap-servers=localhost:9092",
         ])
         .expect("parse defaults");
         assert!(defaults.runtime_config().is_ok());
+    }
+
+    #[test]
+    fn admin_listener_can_be_disabled() {
+        let args = Args::try_parse_from([
+            "krabka-schema-registry",
+            "--bootstrap-servers=localhost:9092",
+            "--admin-listen-addr=off",
+        ])
+        .expect("parse disabled admin listener");
+        assert!(args.admin_listen_addr == AdminListenAddr(None));
     }
 }

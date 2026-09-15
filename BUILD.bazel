@@ -25,17 +25,17 @@ alias(
 # The registry server. `bazel run //:registry_bin -- --help`.
 alias(
     name = "registry_bin",
-    actual = "//crates/schema-registry:crabka-schema-registry",
+    actual = "//crates/schema-registry:krabka-schema-registry",
 )
 
 # Registers a schema file under a subject.
 alias(
     name = "push_bin",
-    actual = "//crates/schema-registry:crabka-schema-push",
+    actual = "//crates/schema-registry:krabka-schema-push",
 )
 
 # Checks a schema against a subject's history without registering it.
 alias(
     name = "compat_check_bin",
-    actual = "//crates/schema-registry:crabka-schema-compat-check",
+    actual = "//crates/schema-registry:krabka-schema-compat-check",
 )

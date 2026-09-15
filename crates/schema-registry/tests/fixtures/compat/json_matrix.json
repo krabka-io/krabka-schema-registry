@@ -603,23 +603,16 @@
   },
   {
     "case": "dependency_added",
-    "is_compatible": true,
+    "is_compatible": false,
     "level": "BACKWARD",
-    "reader": "{\"type\":\"object\",\"dependentRequired\":{\"a\":[\"b\"]}}",
+    "reader": "{\"type\":\"object\",\"dependencies\":{\"a\":[\"b\"]}}",
     "writer": "{\"type\":\"object\"}"
   },
   {
     "case": "dependency_added",
     "is_compatible": true,
     "level": "FORWARD",
-    "reader": "{\"type\":\"object\",\"dependentRequired\":{\"a\":[\"b\"]}}",
-    "writer": "{\"type\":\"object\"}"
-  },
-  {
-    "case": "dependency_added",
-    "is_compatible": true,
-    "level": "FULL",
-    "reader": "{\"type\":\"object\",\"dependentRequired\":{\"a\":[\"b\"]}}",
+    "reader": "{\"type\":\"object\",\"dependencies\":{\"a\":[\"b\"]}}",
     "writer": "{\"type\":\"object\"}"
   },
   {
@@ -642,5 +635,432 @@
     "level": "FULL",
     "reader": "{\"type\":\"object\",\"if\":{\"required\":[\"a\"]},\"then\":{\"required\":[\"b\"]}}",
     "writer": "{\"type\":\"object\"}"
+  },
+  {
+    "case": "inline_to_ref",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "{\"$ref\":\"#/$defs/T\",\"$defs\":{\"T\":{\"type\":\"integer\"}}}",
+    "writer": "{\"type\":\"integer\"}"
+  },
+  {
+    "case": "inline_to_ref",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"$ref\":\"#/$defs/T\",\"$defs\":{\"T\":{\"type\":\"integer\"}}}",
+    "writer": "{\"type\":\"integer\"}"
+  },
+  {
+    "case": "inline_to_ref",
+    "is_compatible": true,
+    "level": "FULL",
+    "reader": "{\"$ref\":\"#/$defs/T\",\"$defs\":{\"T\":{\"type\":\"integer\"}}}",
+    "writer": "{\"type\":\"integer\"}"
+  },
+  {
+    "case": "ref_to_inline",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"integer\"}",
+    "writer": "{\"$ref\":\"#/$defs/T\",\"$defs\":{\"T\":{\"type\":\"integer\"}}}"
+  },
+  {
+    "case": "ref_to_inline",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"integer\"}",
+    "writer": "{\"$ref\":\"#/$defs/T\",\"$defs\":{\"T\":{\"type\":\"integer\"}}}"
+  },
+  {
+    "case": "ref_to_inline",
+    "is_compatible": true,
+    "level": "FULL",
+    "reader": "{\"type\":\"integer\"}",
+    "writer": "{\"$ref\":\"#/$defs/T\",\"$defs\":{\"T\":{\"type\":\"integer\"}}}"
+  },
+  {
+    "case": "closed_to_open_removed_property",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"}}}",
+    "writer": "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"a\":{\"type\":\"integer\"},\"b\":{\"type\":\"string\"}}}"
+  },
+  {
+    "case": "closed_to_open_removed_property",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"}}}",
+    "writer": "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"a\":{\"type\":\"integer\"},\"b\":{\"type\":\"string\"}}}"
+  },
+  {
+    "case": "closed_to_open_removed_property",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"}}}",
+    "writer": "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"a\":{\"type\":\"integer\"},\"b\":{\"type\":\"string\"}}}"
+  },
+  {
+    "case": "pattern_property_covered",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"object\",\"patternProperties\":{\"^x\":{\"type\":\"string\"}},\"properties\":{\"x\":{\"type\":\"string\"}}}",
+    "writer": "{\"type\":\"object\",\"patternProperties\":{\"^x\":{\"type\":\"string\"}}}"
+  },
+  {
+    "case": "pattern_property_covered",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"object\",\"patternProperties\":{\"^x\":{\"type\":\"string\"}},\"properties\":{\"x\":{\"type\":\"string\"}}}",
+    "writer": "{\"type\":\"object\",\"patternProperties\":{\"^x\":{\"type\":\"string\"}}}"
+  },
+  {
+    "case": "pattern_property_covered",
+    "is_compatible": true,
+    "level": "FULL",
+    "reader": "{\"type\":\"object\",\"patternProperties\":{\"^x\":{\"type\":\"string\"}},\"properties\":{\"x\":{\"type\":\"string\"}}}",
+    "writer": "{\"type\":\"object\",\"patternProperties\":{\"^x\":{\"type\":\"string\"}}}"
+  },
+  {
+    "case": "required_existing_with_default",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\",\"default\":\"\"}},\"required\":[\"a\"]}",
+    "writer": "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\",\"default\":\"\"}}}"
+  },
+  {
+    "case": "required_existing_with_default",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\",\"default\":\"\"}},\"required\":[\"a\"]}",
+    "writer": "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\",\"default\":\"\"}}}"
+  },
+  {
+    "case": "required_existing_with_default",
+    "is_compatible": true,
+    "level": "FULL",
+    "reader": "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\",\"default\":\"\"}},\"required\":[\"a\"]}",
+    "writer": "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\",\"default\":\"\"}}}"
+  },
+  {
+    "case": "required_added_closed_with_default",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"a\":{\"type\":\"string\",\"default\":\"\"}},\"required\":[\"a\"]}",
+    "writer": "{\"type\":\"object\",\"additionalProperties\":false}"
+  },
+  {
+    "case": "required_added_closed_with_default",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"a\":{\"type\":\"string\",\"default\":\"\"}},\"required\":[\"a\"]}",
+    "writer": "{\"type\":\"object\",\"additionalProperties\":false}"
+  },
+  {
+    "case": "required_added_closed_with_default",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"a\":{\"type\":\"string\",\"default\":\"\"}},\"required\":[\"a\"]}",
+    "writer": "{\"type\":\"object\",\"additionalProperties\":false}"
+  },
+  {
+    "case": "additional_properties_narrowed",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"object\",\"additionalProperties\":{\"type\":\"string\"}}",
+    "writer": "{\"type\":\"object\"}"
+  },
+  {
+    "case": "additional_properties_narrowed",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"object\",\"additionalProperties\":{\"type\":\"string\"}}",
+    "writer": "{\"type\":\"object\"}"
+  },
+  {
+    "case": "additional_properties_schema_changed",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"object\",\"additionalProperties\":{\"type\":\"string\"}}",
+    "writer": "{\"type\":\"object\",\"additionalProperties\":{\"type\":\"integer\"}}"
+  },
+  {
+    "case": "additional_properties_schema_changed",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"object\",\"additionalProperties\":{\"type\":\"string\"}}",
+    "writer": "{\"type\":\"object\",\"additionalProperties\":{\"type\":\"integer\"}}"
+  },
+  {
+    "case": "additional_properties_schema_changed",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"type\":\"object\",\"additionalProperties\":{\"type\":\"string\"}}",
+    "writer": "{\"type\":\"object\",\"additionalProperties\":{\"type\":\"integer\"}}"
+  },
+  {
+    "case": "plain_widened_to_anyof",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"integer\"}]}",
+    "writer": "{\"type\":\"string\"}"
+  },
+  {
+    "case": "plain_widened_to_anyof",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"integer\"}]}",
+    "writer": "{\"type\":\"string\"}"
+  },
+  {
+    "case": "plain_widened_to_anyof",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"integer\"}]}",
+    "writer": "{\"type\":\"string\"}"
+  },
+  {
+    "case": "anyof_branch_relaxed",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "{\"anyOf\":[{\"type\":\"integer\",\"maximum\":10}]}",
+    "writer": "{\"anyOf\":[{\"type\":\"integer\",\"maximum\":5}]}"
+  },
+  {
+    "case": "anyof_branch_relaxed",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "{\"anyOf\":[{\"type\":\"integer\",\"maximum\":10}]}",
+    "writer": "{\"anyOf\":[{\"type\":\"integer\",\"maximum\":5}]}"
+  },
+  {
+    "case": "anyof_branch_relaxed",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"anyOf\":[{\"type\":\"integer\",\"maximum\":10}]}",
+    "writer": "{\"anyOf\":[{\"type\":\"integer\",\"maximum\":5}]}"
+  },
+  {
+    "case": "oneof_to_anyof",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "{\"anyOf\":[{\"type\":\"string\"}]}",
+    "writer": "{\"oneOf\":[{\"type\":\"string\"}]}"
+  },
+  {
+    "case": "oneof_to_anyof",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "{\"anyOf\":[{\"type\":\"string\"}]}",
+    "writer": "{\"oneOf\":[{\"type\":\"string\"}]}"
+  },
+  {
+    "case": "oneof_to_anyof",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"anyOf\":[{\"type\":\"string\"}]}",
+    "writer": "{\"oneOf\":[{\"type\":\"string\"}]}"
+  },
+  {
+    "case": "not_subschema_narrowed",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "{\"not\":{\"type\":\"integer\"}}",
+    "writer": "{\"not\":{\"type\":\"number\"}}"
+  },
+  {
+    "case": "not_subschema_narrowed",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "{\"not\":{\"type\":\"integer\"}}",
+    "writer": "{\"not\":{\"type\":\"number\"}}"
+  },
+  {
+    "case": "not_subschema_narrowed",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"not\":{\"type\":\"integer\"}}",
+    "writer": "{\"not\":{\"type\":\"number\"}}"
+  },
+  {
+    "case": "second_combinator_narrowed",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "{\"allOf\":[{\"type\":\"object\"}],\"anyOf\":[{\"type\":\"string\"}]}",
+    "writer": "{\"allOf\":[{\"type\":\"object\"}],\"anyOf\":[{\"type\":\"string\"},{\"type\":\"integer\"}]}"
+  },
+  {
+    "case": "second_combinator_narrowed",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"allOf\":[{\"type\":\"object\"}],\"anyOf\":[{\"type\":\"string\"}]}",
+    "writer": "{\"allOf\":[{\"type\":\"object\"}],\"anyOf\":[{\"type\":\"string\"},{\"type\":\"integer\"}]}"
+  },
+  {
+    "case": "tuple_positional_type_change",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"array\",\"items\":[{\"type\":\"string\"}]}",
+    "writer": "{\"type\":\"array\",\"items\":[{\"type\":\"integer\"}]}"
+  },
+  {
+    "case": "tuple_positional_type_change",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"array\",\"items\":[{\"type\":\"string\"}]}",
+    "writer": "{\"type\":\"array\",\"items\":[{\"type\":\"integer\"}]}"
+  },
+  {
+    "case": "tuple_positional_type_change",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"type\":\"array\",\"items\":[{\"type\":\"string\"}]}",
+    "writer": "{\"type\":\"array\",\"items\":[{\"type\":\"integer\"}]}"
+  },
+  {
+    "case": "items_schema_to_tuple",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"array\",\"items\":[{\"type\":\"integer\"}]}",
+    "writer": "{\"type\":\"array\",\"items\":{\"type\":\"integer\"}}"
+  },
+  {
+    "case": "items_schema_to_tuple",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"array\",\"items\":[{\"type\":\"integer\"}]}",
+    "writer": "{\"type\":\"array\",\"items\":{\"type\":\"integer\"}}"
+  },
+  {
+    "case": "items_schema_to_tuple",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"type\":\"array\",\"items\":[{\"type\":\"integer\"}]}",
+    "writer": "{\"type\":\"array\",\"items\":{\"type\":\"integer\"}}"
+  },
+  {
+    "case": "items_tuple_to_schema",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"array\",\"items\":{\"type\":\"integer\"}}",
+    "writer": "{\"type\":\"array\",\"items\":[{\"type\":\"integer\"}]}"
+  },
+  {
+    "case": "items_tuple_to_schema",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"array\",\"items\":{\"type\":\"integer\"}}",
+    "writer": "{\"type\":\"array\",\"items\":[{\"type\":\"integer\"}]}"
+  },
+  {
+    "case": "items_tuple_to_schema",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"type\":\"array\",\"items\":{\"type\":\"integer\"}}",
+    "writer": "{\"type\":\"array\",\"items\":[{\"type\":\"integer\"}]}"
+  },
+  {
+    "case": "unique_items_added",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"array\",\"uniqueItems\":true}",
+    "writer": "{\"type\":\"array\"}"
+  },
+  {
+    "case": "unique_items_added",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"array\",\"uniqueItems\":true}",
+    "writer": "{\"type\":\"array\"}"
+  },
+  {
+    "case": "unique_items_removed",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"array\"}",
+    "writer": "{\"type\":\"array\",\"uniqueItems\":true}"
+  },
+  {
+    "case": "unique_items_removed",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"array\"}",
+    "writer": "{\"type\":\"array\",\"uniqueItems\":true}"
+  },
+  {
+    "case": "unique_items_removed",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"type\":\"array\"}",
+    "writer": "{\"type\":\"array\",\"uniqueItems\":true}"
+  },
+  {
+    "case": "integer_to_number",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"number\"}",
+    "writer": "{\"type\":\"integer\"}"
+  },
+  {
+    "case": "integer_to_number",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"number\"}",
+    "writer": "{\"type\":\"integer\"}"
+  },
+  {
+    "case": "integer_to_number",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"type\":\"number\"}",
+    "writer": "{\"type\":\"integer\"}"
+  },
+  {
+    "case": "number_to_integer",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"integer\"}",
+    "writer": "{\"type\":\"number\"}"
+  },
+  {
+    "case": "number_to_integer",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"integer\"}",
+    "writer": "{\"type\":\"number\"}"
+  },
+  {
+    "case": "multiple_of_reduced",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"integer\",\"multipleOf\":2}",
+    "writer": "{\"type\":\"integer\",\"multipleOf\":4}"
+  },
+  {
+    "case": "multiple_of_reduced",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"integer\",\"multipleOf\":2}",
+    "writer": "{\"type\":\"integer\",\"multipleOf\":4}"
+  },
+  {
+    "case": "multiple_of_reduced",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"type\":\"integer\",\"multipleOf\":2}",
+    "writer": "{\"type\":\"integer\",\"multipleOf\":4}"
+  },
+  {
+    "case": "multiple_of_expanded",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"integer\",\"multipleOf\":4}",
+    "writer": "{\"type\":\"integer\",\"multipleOf\":2}"
+  },
+  {
+    "case": "multiple_of_expanded",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"integer\",\"multipleOf\":4}",
+    "writer": "{\"type\":\"integer\",\"multipleOf\":2}"
   }
 ]

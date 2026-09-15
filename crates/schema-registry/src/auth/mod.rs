@@ -1,9 +1,9 @@
 //! Authentication middleware.
 //!
-//! It resolves a `crabka_security::Principal` from each request into the
+//! It resolves a `krabka_security::Principal` from each request into the
 //! request extensions, in the order mTLS → Bearer → Basic → Anonymous. It
 //! returns `401` on a bad credential, and on a missing credential when
-//! `require_auth` is set. It reuses the `crabka_security` validators, and only
+//! `require_auth` is set. It reuses the `krabka_security` validators, and only
 //! `BasicAuthStore` is local. It models `grpc-gateway/src/authz/auth_layer.rs`.
 pub mod basic;
 
@@ -13,11 +13,12 @@ use axum::{
     extract::{Request, State},
     http::{HeaderMap, StatusCode, header},
     middleware::Next,
-    response::{IntoResponse, Response},
+    response::Response,
 };
 use base64::Engine as _;
 use basic::BasicAuthStore;
-use crabka_security::{AuthMethod, OAuthBearerValidator, Principal};
+use krabka_audit::{AuditEndpoint, AuditEvent, AuditLog, AuditOutcome, AuditPrincipal};
+use krabka_security::{AuthMethod, OAuthBearerValidator, Principal};
 
 /// An mTLS-authenticated principal that the TLS accept loop inserts.
 /// `auth_layer` consumes it as the highest-precedence source.
@@ -28,6 +29,8 @@ pub struct MtlsPrincipal(pub Principal);
 /// clone, because the stores live behind `Arc`.
 #[derive(Clone)]
 pub struct AuthState {
+    /// Security audit event channel.
+    pub audit: Arc<AuditLog>,
     /// HTTP Basic credential store; `None` disables Basic.
     pub basic: Option<Arc<BasicAuthStore>>,
     /// Bearer (OAuth) token validator; `None` disables Bearer.
@@ -36,7 +39,13 @@ pub struct AuthState {
     pub require_auth: bool,
     /// Realm advertised in the `WWW-Authenticate: basic realm="…"` header.
     pub realm: String,
+    /// Shared credential accepted on secondary-to-primary forwards.
+    pub forward_secret: Option<String>,
 }
+
+/// Internal proof that the forward headers carried the configured credential.
+#[derive(Clone, Copy)]
+pub(crate) struct AuthenticatedForward;
 
 /// The outcome of [`resolve`]. It is an authenticated principal, or a `401`.
 #[derive(Debug, PartialEq, Eq)]
@@ -97,11 +106,11 @@ pub async fn resolve(
         let Some((user, pass)) = text.split_once(':') else {
             return AuthDecision::Unauthorized;
         };
-        if store.verify(user, pass) {
+        if let Some(roles) = store.authenticate(user, pass) {
             return AuthDecision::Authn(Principal {
                 name: user.to_string(),
                 auth_method: AuthMethod::SaslPlain,
-                groups: Vec::new(),
+                groups: roles.to_vec(),
             });
         }
         return AuthDecision::Unauthorized;
@@ -122,21 +131,22 @@ pub async fn auth_layer(
     mut req: Request,
     next: Next,
 ) -> Response {
-    // SECURITY: a request carrying the inter-node forward header is TRUSTED — its
-    // ingress node already authenticated AND authorized it. Mirror authz_layer's
-    // FORWARD_HEADER skip so auth and authz agree on the same trust boundary
-    // (operators MUST isolate the inter-node forwarding link; a client that forges
-    // `X-Forwarded-For-Registry` bypasses both).
-    // This is required for ALL auth methods: an mTLS client's credential (its TLS
-    // client cert) cannot be carried over the secondary→primary proxy hop, so the
-    // primary must trust the forward rather than re-authenticate.
+    let authenticated_forward = req
+        .headers()
+        .get(crate::rest::forward::FORWARD_SECRET_HEADER)
+        .zip(st.forward_secret.as_deref())
+        .is_some_and(|(actual, expected)| {
+            basic::constant_time_eq(expected.as_bytes(), actual.as_bytes())
+        });
     if req
         .headers()
         .contains_key(crate::rest::forward::FORWARD_HEADER)
+        && authenticated_forward
     {
         if req.extensions().get::<Principal>().is_none() {
             req.extensions_mut().insert(anonymous());
         }
+        req.extensions_mut().insert(AuthenticatedForward);
         return next.run(req).await;
     }
     let mtls = req.extensions().get::<MtlsPrincipal>().map(|m| m.0.clone());
@@ -146,7 +156,72 @@ pub async fn auth_layer(
             req.extensions_mut().insert(p);
             next.run(req).await
         }
-        AuthDecision::Unauthorized => unauthorized(&st),
+        AuthDecision::Unauthorized => {
+            let authorization = req
+                .headers()
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok());
+            let (mechanism, name) = attempted_identity(authorization);
+            let source = req
+                .extensions()
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map_or(
+                    AuditEndpoint {
+                        ip: "unknown".into(),
+                        port: 0,
+                    },
+                    |axum::extract::ConnectInfo(peer)| AuditEndpoint {
+                        ip: peer.ip().to_string(),
+                        port: peer.port(),
+                    },
+                );
+            st.audit.emit(AuditEvent::Authentication {
+                outcome: AuditOutcome::Failure,
+                mechanism: mechanism.into(),
+                principal: AuditPrincipal {
+                    name,
+                    auth_method: mechanism.into(),
+                },
+                source,
+                reason: Some(format!(
+                    "{} {} authentication failed",
+                    req.method(),
+                    req.uri().path()
+                )),
+                time_ms: now,
+            });
+            unauthorized(&st)
+        }
+    }
+}
+
+fn attempted_identity(authorization: Option<&str>) -> (&'static str, String) {
+    if let Some(encoded) = authorization.and_then(|value| value.strip_prefix("Basic ")) {
+        let name = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .ok()
+            .and_then(|raw| String::from_utf8(raw).ok())
+            .and_then(|value| value.split_once(':').map(|(name, _)| name.to_owned()))
+            .unwrap_or_else(|| "unknown".into());
+        ("basic", name)
+    } else if authorization.is_some_and(|value| value.starts_with("Bearer ")) {
+        ("bearer", "unknown".into())
+    } else if authorization.is_some() {
+        ("unknown", "unknown".into())
+    } else {
+        ("none", "ANONYMOUS".into())
+    }
+}
+
+pub(crate) fn audit_auth_method(method: AuthMethod) -> &'static str {
+    match method {
+        AuthMethod::Anonymous => "none",
+        AuthMethod::SaslPlain => "basic",
+        AuthMethod::SaslOAuthBearer => "bearer",
+        AuthMethod::MTls => "mtls",
+        AuthMethod::SaslScramSha256 | AuthMethod::SaslScramSha512 | AuthMethod::SaslGssapi => {
+            "unknown"
+        }
     }
 }
 
@@ -165,13 +240,7 @@ pub async fn auth_layer(
 ///   `authentication.realm`, which is the JAAS entry name, and is
 ///   `SchemaRegistry-Props` in the capture.
 fn unauthorized(st: &AuthState) -> Response {
-    let body = serde_json::json!({ "error_code": 401, "message": "Unauthorized" }).to_string();
-    let mut resp = (
-        StatusCode::UNAUTHORIZED,
-        [("content-type", crate::error::CONTENT_TYPE)],
-        body,
-    )
-        .into_response();
+    let mut resp = crate::error::error_response(StatusCode::UNAUTHORIZED, 401, "Unauthorized");
     if st.basic.is_some()
         && let Ok(v) = header::HeaderValue::from_str(&format!("basic realm=\"{}\"", st.realm))
     {
@@ -182,7 +251,7 @@ fn unauthorized(st: &AuthState) -> Response {
 
 /// Current time as Unix epoch milliseconds, used to pass `now_ms` to
 /// [`OAuthBearerValidator::validate`]. Falls back to `0` on clock anomalies.
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -217,10 +286,12 @@ mod tests {
                 .collect(),
         );
         AuthState {
+            audit: AuditLog::disabled(),
             basic: Some(Arc::new(store)),
             bearer: None,
             require_auth,
             realm: "schema-registry".to_string(),
+            forward_secret: None,
         }
     }
 
@@ -278,15 +349,17 @@ mod tests {
         // principal name resolves to that principal (exercises the configured-
         // validator success branch of `resolve`).
         use base64::Engine as _;
-        let validator = OAuthBearerValidator::Unsecured(crabka_security::UnsecuredJwsValidator {
+        let validator = OAuthBearerValidator::Unsecured(krabka_security::UnsecuredJwsValidator {
             principal_claim_name: "sub".to_string(),
             ..Default::default()
         });
         let st = AuthState {
+            audit: AuditLog::disabled(),
             basic: None,
             bearer: Some(Arc::new(validator)),
             require_auth: true,
             realm: "schema-registry".to_string(),
+            forward_secret: None,
         };
         // Minimal unsigned JWT: header.payload.signature (empty sig for
         // `alg:none`). The validator requires an `exp` claim in the future, so
@@ -306,10 +379,12 @@ mod tests {
     #[tokio::test]
     async fn presented_but_unconfigured_credential_cases_are_unauthorized() {
         let state = AuthState {
+            audit: AuditLog::disabled(),
             basic: None,
             bearer: None,
             require_auth: false,
             realm: "schema-registry".to_string(),
+            forward_secret: None,
         };
         for (_name, authorization) in [
             ("bearer", "Bearer some.jwt.token".to_string()),
@@ -356,35 +431,41 @@ mod tests {
         assert2::assert!(decision == AuthDecision::Authn(mtls));
     }
 
-    /// Model A: `auth_layer` TRUSTS a request that carries `FORWARD_HEADER` and
-    /// runs the handler even under `require_auth` with no credentials, because
-    /// the ingress node already authenticated it. A non-forwarded
-    /// credential-less request still returns `401`. This mechanism lets ALL
-    /// auth methods work, including mTLS, whose credential cannot cross the
-    /// secondary→primary hop. See `proxy()`, which forwards no credential, only
-    /// `FORWARD_HEADER`.
     #[tokio::test]
-    async fn forwarded_request_bypasses_require_auth() {
+    async fn only_authenticated_forward_bypasses_require_auth() {
         use axum::{Router, body::Body, routing::get};
         use tower::ServiceExt as _; // for `oneshot`
 
         let st = AuthState {
+            audit: AuditLog::disabled(),
             basic: None,
             bearer: None,
             require_auth: true,
             realm: "schema-registry".to_string(),
+            forward_secret: Some("shared-secret".into()),
         };
         let app: Router = Router::new().route("/", get(|| async { "ok" })).layer(
             axum::middleware::from_fn_with_state(Arc::new(st), auth_layer),
         );
 
-        for (_name, forwarded, expected) in [
-            ("forwarded_request", true, StatusCode::OK),
-            ("non_forwarded_request", false, StatusCode::UNAUTHORIZED),
+        for (_name, forward_secret, expected) in [
+            (
+                "authenticated_forward",
+                Some("shared-secret"),
+                StatusCode::OK,
+            ),
+            ("forged_forward", None, StatusCode::UNAUTHORIZED),
+            (
+                "wrong_forward_secret",
+                Some("wrong"),
+                StatusCode::UNAUTHORIZED,
+            ),
         ] {
-            let mut request = Request::builder().uri("/");
-            if forwarded {
-                request = request.header(crate::rest::forward::FORWARD_HEADER, "ingress-node");
+            let mut request = Request::builder()
+                .uri("/")
+                .header(crate::rest::forward::FORWARD_HEADER, "ingress-node");
+            if let Some(secret) = forward_secret {
+                request = request.header(crate::rest::forward::FORWARD_SECRET_HEADER, secret);
             }
             let response = app
                 .clone()
@@ -395,8 +476,8 @@ mod tests {
         }
     }
 
-    /// cp-byte-exact pin. This test drives `auth_layer` with Basic configured
-    /// over a tiny router with NO credentials, and asserts that the `401`
+    /// cp-byte-exact pin. This test drives `auth_layer` with a valid password
+    /// but a non-permitted role, and asserts that the `401`
     /// matches `mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0`
     /// (`tests/fixtures/auth/basic.json`) byte-for-byte:
     ///
@@ -416,15 +497,21 @@ mod tests {
 
         // The realm cp emitted in the capture (its `authentication.realm` = the
         // JAAS entry name). Our binary defaults to the same value.
+        let store = BasicAuthStore::load(&crate::config::BasicAuthConfig {
+            users: [("alice".to_string(), "pw,user".to_string())]
+                .into_iter()
+                .collect(),
+            required_roles: ["admin".to_string()].into_iter().collect(),
+            ..Default::default()
+        })
+        .unwrap();
         let st = AuthState {
-            basic: Some(Arc::new(BasicAuthStore::from_users(
-                [("alice".to_string(), "pw".to_string())]
-                    .into_iter()
-                    .collect(),
-            ))),
+            audit: AuditLog::disabled(),
+            basic: Some(Arc::new(store)),
             bearer: None,
             require_auth: true,
             realm: "SchemaRegistry-Props".to_string(),
+            forward_secret: None,
         };
         let app: Router = Router::new()
             .route("/subjects", get(|| async { "[]" }))
@@ -435,6 +522,7 @@ mod tests {
 
         let req = Request::builder()
             .uri("/subjects")
+            .header(header::AUTHORIZATION, basic_b64("alice", "pw"))
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();

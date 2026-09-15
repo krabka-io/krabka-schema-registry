@@ -5,7 +5,7 @@ use std::{
     path::PathBuf,
 };
 
-use crabka_units::prelude::*;
+use krabka_units::prelude::*;
 use refined_type::{Refined, rule::GreaterI32};
 
 fn protocol_millis_i32(name: &str, value: Time) -> anyhow::Result<i32> {
@@ -45,7 +45,7 @@ fn protocol_bytes_i32(name: &str, value: ByteSize) -> anyhow::Result<i32> {
 /// Resolved configuration for a running registry node.
 #[derive(Debug, Clone)]
 pub struct RegistryConfig {
-    /// `host:port[,host:port...]` bootstrap addresses for the Crabka broker.
+    /// `host:port[,host:port...]` bootstrap addresses for the Krabka broker.
     pub bootstrap: String,
     /// Name of the backing compacted topic. Confluent default: `_schemas`.
     pub schemas_topic: String,
@@ -74,8 +74,8 @@ pub struct RegistryConfig {
 /// `PartialEq` but not `Eq`. Nothing keys a map or set on a runtime config.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RegistryRuntimeConfig {
-    pub client_dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
-    pub client_frame_max: crabka_client_core::ClientFrameMax,
+    pub client_dispatch_queue_capacity: krabka_client_core::ConnectionDispatchQueueCapacity,
+    pub client_frame_max: krabka_client_core::ClientFrameMax,
     pub election_session_timeout: Time,
     pub election_rebalance_timeout: Time,
     pub election_heartbeat_interval: Time,
@@ -83,6 +83,9 @@ pub struct RegistryRuntimeConfig {
     pub store_reader_retry_backoff: Time,
     pub store_reader_fetch_max_wait: Time,
     pub store_reader_fetch_max: ByteSize,
+    /// Maximum duration of one schema-store operation. Confluent setting:
+    /// `kafkastore.timeout.ms` (60 seconds by default).
+    pub store_timeout: Time,
     pub schemas_topic_create_timeout: Time,
     /// Largest forwarded request body this node will buffer before replaying it
     /// to the primary.
@@ -131,8 +134,8 @@ impl Default for RegistryRuntimeConfig {
     fn default() -> Self {
         Self {
             client_dispatch_queue_capacity:
-                crabka_client_core::ConnectionDispatchQueueCapacity::default(),
-            client_frame_max: crabka_client_core::ClientFrameMax::default(),
+                krabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            client_frame_max: krabka_client_core::ClientFrameMax::default(),
             election_session_timeout: secs(10),
             election_rebalance_timeout: secs(30),
             election_heartbeat_interval: secs(3),
@@ -140,6 +143,7 @@ impl Default for RegistryRuntimeConfig {
             store_reader_retry_backoff: millis(250),
             store_reader_fetch_max_wait: millis(500),
             store_reader_fetch_max: mebibytes(1),
+            store_timeout: secs(60),
             schemas_topic_create_timeout: secs(15),
             forward_max_body: mebibytes(16),
             default_compatibility_level: "BACKWARD".into(),
@@ -160,25 +164,33 @@ pub struct SecurityConfig {
     pub basic: Option<BasicAuthConfig>,
     pub bearer: Option<BearerAuthConfig>,
     /// Server TLS (HTTPS). None means plain HTTP.
-    pub tls: Option<crabka_security::TlsConfig>,
+    pub tls: Option<krabka_security::TlsConfig>,
     pub authz: Option<AuthzConfig>,
+    /// Shared credential authenticating secondary-to-primary HTTP forwards.
+    pub forward_secret: Option<String>,
     /// SR-to-broker Kafka-client security. None means PLAINTEXT.
-    pub client: Option<crabka_client_core::ClientSecurity>,
+    pub client: Option<krabka_client_core::ClientSecurity>,
 }
 
 /// Inline `user -> credential`. The credential is plaintext, as cp's
 /// `PropertyFileLoginModule` expects, or a `$2...` bcrypt hash. `file` is an
 /// htpasswd-style `user:cred` path.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct BasicAuthConfig {
     pub users: HashMap<String, String>,
     pub file: Option<PathBuf>,
+    pub required_roles: HashSet<String>,
+}
+impl std::fmt::Debug for BasicAuthConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BasicAuthConfig")
+    }
 }
 
 /// Reuse the broker OAuth validator; stored already-built.
 #[derive(Clone)]
 pub struct BearerAuthConfig {
-    pub validator: std::sync::Arc<crabka_security::OAuthBearerValidator>,
+    pub validator: std::sync::Arc<krabka_security::OAuthBearerValidator>,
 }
 impl std::fmt::Debug for BearerAuthConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -210,7 +222,7 @@ pub const DEFAULT_ACL_REFRESH: Time = secs(30);
 #[cfg(test)]
 mod tests {
     use assert2::check;
-    use crabka_units::prelude::*;
+    use krabka_units::prelude::*;
 
     use super::{RegistryRuntimeConfig, SecurityConfig};
     use crate::config_value::PositiveI32;
@@ -223,8 +235,8 @@ mod tests {
             RegistryRuntimeConfig::default()
                 == RegistryRuntimeConfig {
                     client_dispatch_queue_capacity:
-                        crabka_client_core::ConnectionDispatchQueueCapacity::default(),
-                    client_frame_max: crabka_client_core::ClientFrameMax::default(),
+                        krabka_client_core::ConnectionDispatchQueueCapacity::default(),
+                    client_frame_max: krabka_client_core::ClientFrameMax::default(),
                     election_session_timeout: secs(10),
                     election_rebalance_timeout: secs(30),
                     election_heartbeat_interval: secs(3),
@@ -232,6 +244,7 @@ mod tests {
                     store_reader_retry_backoff: millis(250),
                     store_reader_fetch_max_wait: millis(500),
                     store_reader_fetch_max: mebibytes(1),
+                    store_timeout: secs(60),
                     schemas_topic_create_timeout: secs(15),
                     forward_max_body: mebibytes(16),
                     default_compatibility_level: "BACKWARD".into(),
@@ -265,8 +278,9 @@ mod tests {
                 s.bearer.is_none(),
                 s.tls.is_none(),
                 s.authz.is_none(),
+                s.forward_secret.is_none(),
                 s.client.is_none(),
-            ) == (false, true, true, true, true, true, true)
+            ) == (false, true, true, true, true, true, true, true)
         );
     }
 
@@ -287,10 +301,21 @@ mod tests {
         // The manual Debug impl exists so a validator (which may wrap JWKS
         // handles / secrets) never lands in logs — it must render as the opaque
         // tag regardless of its contents.
-        let validator = std::sync::Arc::new(crabka_security::OAuthBearerValidator::Unsecured(
-            crabka_security::UnsecuredJwsValidator::default(),
+        let validator = std::sync::Arc::new(krabka_security::OAuthBearerValidator::Unsecured(
+            krabka_security::UnsecuredJwsValidator::default(),
         ));
         let cfg = super::BearerAuthConfig { validator };
         check!(format!("{cfg:?}") == "BearerAuthConfig");
+    }
+
+    #[test]
+    fn basic_auth_config_debug_does_not_leak_credentials() {
+        let cfg = super::BasicAuthConfig {
+            users: [("alice".to_owned(), "secret".to_owned())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        check!(format!("{cfg:?}") == "BasicAuthConfig");
     }
 }

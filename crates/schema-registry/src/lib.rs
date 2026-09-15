@@ -1,13 +1,13 @@
-//! Confluent Schema Registry-compatible REST service for Crabka.
+//! Confluent Schema Registry-compatible REST service for Krabka.
 //!
-//! This is a standalone binary and a Kafka *client* of a Crabka broker. State
+//! This is a standalone binary and a Kafka *client* of a Krabka broker. State
 //! lives in the `_schemas` compacted topic.
 //!
 //! ## Runtime configuration
 //!
 //! ```no_run
 //! use assert2::assert;
-//! use crabka_schema_registry::config::{RegistryConfig, SecurityConfig};
+//! use krabka_schema_registry::config::{RegistryConfig, SecurityConfig};
 //!
 //! let config = RegistryConfig {
 //!     bootstrap: "localhost:9092".into(),
@@ -28,7 +28,7 @@
 //!
 //! ```no_run
 //! use assert2::assert;
-//! use crabka_schema_registry::format::{self, SchemaType};
+//! use krabka_schema_registry::format::{self, SchemaType};
 //!
 //! let prior = r#"{"type":"record","name":"Order","fields":[{"name":"id","type":"string"}]}"#;
 //! let next = r#"{"type":"record","name":"Order","fields":[{"name":"id","type":"string"},{"name":"total","type":["null","double"],"default":null}]}"#;

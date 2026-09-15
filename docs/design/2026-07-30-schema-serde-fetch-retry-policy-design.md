@@ -18,7 +18,7 @@ remain fixed.
 
 ## Validated Library Policy
 
-Add `SchemaFetchRetryPolicy` to `crabka-schema-serde`:
+Add `SchemaFetchRetryPolicy` to `krabka-schema-serde`:
 
 ```rust
 pub struct SchemaFetchRetryPolicy {
@@ -45,7 +45,7 @@ The retry-delay helper receives the validated policy. It uses the configured
 initial and maximum values while preserving the existing exponent cap,
 deterministic jitter calculation, monotonic delay, and maximum clamp.
 
-No environment lookup occurs inside `crabka-schema-serde`.
+No environment lookup occurs inside `krabka-schema-serde`.
 
 ## Owning Configuration Surfaces
 
@@ -53,8 +53,8 @@ No environment lookup occurs inside `crabka-schema-serde`.
 
 Add UOM Clap options backed by:
 
-- `CRABKA_DEMO_SCHEMA_FETCH_RETRY_INITIAL_BACKOFF`;
-- `CRABKA_DEMO_SCHEMA_FETCH_RETRY_MAX_BACKOFF`.
+- `KRABKA_DEMO_SCHEMA_FETCH_RETRY_INITIAL_BACKOFF`;
+- `KRABKA_DEMO_SCHEMA_FETCH_RETRY_MAX_BACKOFF`.
 
 The CLI names are:
 
@@ -75,8 +75,8 @@ validated policy through that existing boundary.
 
 Add the same two UOM options to the Gres compute CLI, backed by:
 
-- `CRABKA_GRES_SCHEMA_FETCH_RETRY_INITIAL_BACKOFF`;
-- `CRABKA_GRES_SCHEMA_FETCH_RETRY_MAX_BACKOFF`.
+- `KRABKA_GRES_SCHEMA_FETCH_RETRY_INITIAL_BACKOFF`;
+- `KRABKA_GRES_SCHEMA_FETCH_RETRY_MAX_BACKOFF`.
 
 Add optional camelCase UOM fields to `GresComputeSpec`:
 

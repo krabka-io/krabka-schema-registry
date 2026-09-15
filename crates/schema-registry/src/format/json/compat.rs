@@ -18,12 +18,19 @@ pub fn is_backward_compatible(kind: &Kind) -> bool {
         // remove_prop_open FORWARD=false in the cp golden matrix.)
         | Kind::PropertyRemovedFromOpenContentModel
         | Kind::PropertyAddedToClosedContentModel
+        | Kind::PropertyAddedCoveredByPartiallyOpenContentModel
+        | Kind::PropertyAddedNotCoveredByPartiallyOpenContentModel
+        | Kind::PropertyRemovedCoveredByPartiallyOpenContentModel
+        | Kind::PropertyWithEmptySchemaAddedToOpenContentModel
 
         // --- Required ---
         | Kind::RequiredAttributeRemoved
+        | Kind::RequiredAttributeWithDefaultAdded
+        | Kind::RequiredPropertyWithDefaultAddedToClosedContentModel
 
         // --- AdditionalProperties ---
         | Kind::AdditionalPropertiesAdded
+        | Kind::AdditionalPropertiesExtended
 
         // --- Enum / const ---
         // Narrowed = fewer allowed values = breaking for readers expecting old values
@@ -49,6 +56,7 @@ pub fn is_backward_compatible(kind: &Kind) -> bool {
 
         // --- MultipleOf: added/changed = tighter ---
         | Kind::MultipleOfRemoved
+        | Kind::MultipleOfReduced
 
         // --- String: maxLength ---
         | Kind::MaxLengthRemoved
@@ -71,6 +79,8 @@ pub fn is_backward_compatible(kind: &Kind) -> bool {
 
         // --- Array: additionalItems ---
         | Kind::AdditionalItemsAdded
+        | Kind::AdditionalItemsExtended
+        | Kind::UniqueItemsRemoved
 
         // --- Object size: maxProperties ---
         | Kind::MaxPropertiesRemoved
@@ -81,16 +91,15 @@ pub fn is_backward_compatible(kind: &Kind) -> bool {
         | Kind::MinPropertiesDecreased
 
         // --- Combinators ---
-        | Kind::ProductTypeExtended
+        | Kind::CombinedTypeExtended
+        | Kind::ProductTypeNarrowed
         | Kind::SumTypeExtended
-        | Kind::NotTypeExtended
+        | Kind::NotTypeNarrowed
 
         // --- $ref / dependencies / conditionals ---
-        // cp is authority: cp's json.diff treats both adding and removing a
-        // dependency/dependentRequired as compatible in either direction
-        // (dependency_added BACKWARD=FORWARD=true in the cp golden matrix).
-        | Kind::DependencyAdded
-        | Kind::DependencyRemoved
+        | Kind::DependencyArrayRemoved
+        | Kind::DependencyArrayNarrowed
+        | Kind::DependencySchemaRemoved
     )
 }
 
@@ -120,12 +129,21 @@ mod tests {
             Kind::PropertyRemovedFromOpenContentModel,
             Kind::PropertyAddedToClosedContentModel,
             Kind::PropertyRemovedFromClosedContentModel,
+            Kind::PropertyAddedCoveredByPartiallyOpenContentModel,
+            Kind::PropertyAddedNotCoveredByPartiallyOpenContentModel,
+            Kind::PropertyRemovedCoveredByPartiallyOpenContentModel,
+            Kind::PropertyRemovedNotCoveredByPartiallyOpenContentModel,
+            Kind::PropertyWithEmptySchemaAddedToOpenContentModel,
             // --- Required ---
             Kind::RequiredAttributeAdded,
             Kind::RequiredAttributeRemoved,
+            Kind::RequiredAttributeWithDefaultAdded,
+            Kind::RequiredPropertyWithDefaultAddedToClosedContentModel,
             // --- AdditionalProperties ---
             Kind::AdditionalPropertiesRemoved,
             Kind::AdditionalPropertiesAdded,
+            Kind::AdditionalPropertiesNarrowed,
+            Kind::AdditionalPropertiesExtended,
             // --- Enum / const ---
             Kind::EnumArrayNarrowed,
             Kind::EnumArrayExtended,
@@ -153,6 +171,8 @@ mod tests {
             // --- MultipleOf ---
             Kind::MultipleOfAdded,
             Kind::MultipleOfRemoved,
+            Kind::MultipleOfReduced,
+            Kind::MultipleOfExpanded,
             Kind::MultipleOfChanged,
             // --- String: maxLength ---
             Kind::MaxLengthAdded,
@@ -181,6 +201,10 @@ mod tests {
             // --- Array: additionalItems ---
             Kind::AdditionalItemsRemoved,
             Kind::AdditionalItemsAdded,
+            Kind::AdditionalItemsNarrowed,
+            Kind::AdditionalItemsExtended,
+            Kind::UniqueItemsAdded,
+            Kind::UniqueItemsRemoved,
             // --- Object size: maxProperties ---
             Kind::MaxPropertiesAdded,
             Kind::MaxPropertiesRemoved,
@@ -193,6 +217,7 @@ mod tests {
             Kind::MinPropertiesIncreased,
             // --- Combinators ---
             Kind::CombinedTypeChanged,
+            Kind::CombinedTypeExtended,
             Kind::ProductTypeExtended,
             Kind::ProductTypeNarrowed,
             Kind::SumTypeExtended,
@@ -201,8 +226,13 @@ mod tests {
             Kind::NotTypeNarrowed,
             Kind::CombinedTypeSubschemasChanged,
             // --- $ref / dependencies / conditionals ---
-            Kind::DependencyAdded,
-            Kind::DependencyRemoved,
+            Kind::DependencyArrayAdded,
+            Kind::DependencyArrayRemoved,
+            Kind::DependencyArrayExtended,
+            Kind::DependencyArrayNarrowed,
+            Kind::DependencyArrayChanged,
+            Kind::DependencySchemaAdded,
+            Kind::DependencySchemaRemoved,
             Kind::ConditionalChanged,
         ];
         // Every call hits its match arm (coverage goal).
@@ -238,6 +268,8 @@ mod tests {
             (Kind::MinimumIncreased, false),
             (Kind::MultipleOfAdded, false),
             (Kind::MultipleOfRemoved, true),
+            (Kind::MultipleOfReduced, true),
+            (Kind::MultipleOfExpanded, false),
             (Kind::MultipleOfChanged, false),
             (Kind::MaxLengthAdded, false),
             (Kind::MaxLengthRemoved, true),
@@ -250,20 +282,27 @@ mod tests {
             (Kind::MinItemsRemoved, true),
             (Kind::AdditionalItemsRemoved, false),
             (Kind::AdditionalItemsAdded, true),
+            (Kind::UniqueItemsAdded, false),
+            (Kind::UniqueItemsRemoved, true),
             (Kind::MaxPropertiesAdded, false),
             (Kind::MaxPropertiesRemoved, true),
             (Kind::MinPropertiesAdded, false),
             (Kind::MinPropertiesRemoved, true),
             (Kind::CombinedTypeChanged, false),
-            (Kind::ProductTypeExtended, true),
-            (Kind::ProductTypeNarrowed, false),
+            (Kind::CombinedTypeExtended, true),
+            (Kind::ProductTypeExtended, false),
+            (Kind::ProductTypeNarrowed, true),
             (Kind::SumTypeExtended, true),
             (Kind::SumTypeNarrowed, false),
-            (Kind::NotTypeExtended, true),
-            (Kind::NotTypeNarrowed, false),
+            (Kind::NotTypeExtended, false),
+            (Kind::NotTypeNarrowed, true),
             (Kind::CombinedTypeSubschemasChanged, false),
-            (Kind::DependencyAdded, true),
-            (Kind::DependencyRemoved, true),
+            (Kind::DependencyArrayAdded, false),
+            (Kind::DependencyArrayRemoved, true),
+            (Kind::DependencyArrayExtended, false),
+            (Kind::DependencyArrayNarrowed, true),
+            (Kind::DependencySchemaAdded, false),
+            (Kind::DependencySchemaRemoved, true),
             (Kind::ConditionalChanged, false),
         ] {
             assert2::assert!(is_backward_compatible(&kind) == want);

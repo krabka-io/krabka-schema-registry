@@ -116,7 +116,7 @@ mod tests {
                 "with_master",
                 SchemaRegistryGroupAssignment {
                     error: 0,
-                    master: Some("crabka-d7c9d4c3".into()),
+                    master: Some("krabka-d7c9d4c3".into()),
                     master_identity: Some(id("sr-node-1", 8081, true)),
                     version: SR_VERSION,
                 },
@@ -163,7 +163,7 @@ mod tests {
     // ── cp-byte-exact pins (captured from cp-schema-registry 7.4.0) ──────────────
     //
     // Exact bytes from `tests/fixtures/election/{members,group}.json`, captured
-    // by booting two real cp nodes against a Crabka broker and reading the group
+    // by booting two real cp nodes against a Krabka broker and reading the group
     // via DescribeGroups. These run WITHOUT Docker — the durable regression
     // proof that our encoders reproduce cp's wire JSON byte-for-byte.
 
@@ -196,13 +196,13 @@ mod tests {
         // the master member-id string + master_identity object + version.
         let a = SchemaRegistryGroupAssignment {
             error: 0,
-            master: Some("crabka-d7c9d4c3-a778-465d-a069-954b68d772f9".into()),
+            master: Some("krabka-d7c9d4c3-a778-465d-a069-954b68d772f9".into()),
             master_identity: Some(cp_master_identity()),
             version: 1,
         };
         assert2::assert!(
             serde_json::to_vec(&a).unwrap() ==
-            br#"{"error":0,"master":"crabka-d7c9d4c3-a778-465d-a069-954b68d772f9","master_identity":{"host":"sr-node-1","port":8081,"master_eligibility":true,"scheme":"http","version":1},"version":1}"#
+            br#"{"error":0,"master":"krabka-d7c9d4c3-a778-465d-a069-954b68d772f9","master_identity":{"host":"sr-node-1","port":8081,"master_eligibility":true,"scheme":"http","version":1},"version":1}"#
                 .to_vec()
         );
     }
@@ -210,10 +210,10 @@ mod tests {
     #[test]
     fn select_master_matches_cp() {
         // The two CAPTURED identities (both port 8081, hosts sr-node-1/2). cp
-        // elected member `crabka-d7c9...` (host sr-node-1) — the URL-first
+        // elected member `krabka-d7c9...` (host sr-node-1) — the URL-first
         // eligible member. Our comparator must pick the same one.
         let node1 = (
-            "crabka-d7c9d4c3-a778-465d-a069-954b68d772f9".to_string(),
+            "krabka-d7c9d4c3-a778-465d-a069-954b68d772f9".to_string(),
             SchemaRegistryIdentity {
                 host: "sr-node-1".into(),
                 port: 8081,
@@ -223,7 +223,7 @@ mod tests {
             },
         );
         let node2 = (
-            "crabka-e0f909d7-bc38-4a07-8f00-84cf9fd71f17".to_string(),
+            "krabka-e0f909d7-bc38-4a07-8f00-84cf9fd71f17".to_string(),
             SchemaRegistryIdentity {
                 host: "sr-node-2".into(),
                 port: 8081,
@@ -238,7 +238,7 @@ mod tests {
             vec![node2.clone(), node1.clone()],
         ] {
             let (mid, idn) = select_master(&set).expect("a master");
-            assert2::assert!(mid.as_str() == "crabka-d7c9d4c3-a778-465d-a069-954b68d772f9");
+            assert2::assert!(mid.as_str() == "krabka-d7c9d4c3-a778-465d-a069-954b68d772f9");
             assert2::assert!(idn.host.as_str() == "sr-node-1");
         }
     }

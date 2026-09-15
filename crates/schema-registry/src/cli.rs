@@ -13,15 +13,15 @@ use std::{
     sync::Arc,
 };
 
-use crabka_client_core::{
+use krabka_client_core::{
     ClientSecurity,
     security::{SaslCredentials, TlsConnectorConfig},
 };
-use crabka_security::{
+use krabka_security::{
     ClientAuthMode, Jwks, JwksHandle, ListenerProtocol, OAuthBearerValidator, SaslMechanism,
     SignedJwsValidator, TlsConfig,
 };
-use crabka_units::prelude::*;
+use krabka_units::prelude::*;
 
 use crate::config::{
     AuthzConfig, BasicAuthConfig, BearerAuthConfig, DEFAULT_ACL_REFRESH, SecurityConfig,
@@ -36,7 +36,7 @@ pub const DEFAULT_JWKS_REFRESH: Time = minutes(1);
 /// validation and assembly, so it is unit-testable. The all-[`Default`] value
 /// has no TLS, no auth, no authz, and a plaintext broker client, and it yields
 /// the fully-open [`SecurityConfig::default`] behaviour.
-#[derive(Debug, Default, Clone)]
+#[derive(Default, Clone)]
 pub struct SecurityCliInput {
     /// Reject unauthenticated (anonymous) requests with `401`.
     pub require_auth: bool,
@@ -46,6 +46,8 @@ pub struct SecurityCliInput {
     pub basic_auth_file: Option<PathBuf>,
     /// Inline Basic credentials as `user:cred` (repeatable).
     pub basic_users: Vec<String>,
+    /// Basic roles permitted to authenticate. Empty accepts every role.
+    pub auth_roles: Vec<String>,
     /// Bearer-token mode: `off` | `unsecured` | `jwks`.
     pub bearer: String,
     /// JWT claim whose value becomes the principal name (Bearer mode).
@@ -73,6 +75,8 @@ pub struct SecurityCliInput {
     /// ACL-cache refresh interval. `None` uses
     /// [`DEFAULT_ACL_REFRESH`](crate::config::DEFAULT_ACL_REFRESH).
     pub acl_refresh: Option<Time>,
+    /// Shared credential authenticating secondary-to-primary HTTP forwards.
+    pub forward_secret: Option<String>,
     /// Kafka client protocol: `PLAINTEXT` | `SSL` | `SASL_PLAINTEXT` | `SASL_SSL`.
     pub kafka_security_protocol: String,
     /// SASL mechanism: `PLAIN` | `SCRAM-SHA-256` | `SCRAM-SHA-512` | `GSSAPI`.
@@ -81,6 +85,8 @@ pub struct SecurityCliInput {
     pub kafka_sasl_username: Option<String>,
     /// SASL password (PLAIN / SCRAM).
     pub kafka_sasl_password: Option<String>,
+    /// File containing the SASL password (PLAIN / SCRAM).
+    pub kafka_sasl_password_file: Option<PathBuf>,
     /// GSSAPI keytab containing the client principal's long-term key.
     pub kafka_sasl_keytab_path: Option<PathBuf>,
     /// GSSAPI Kerberos client principal.
@@ -97,6 +103,12 @@ pub struct SecurityCliInput {
     pub kafka_tls_ca: Option<PathBuf>,
     /// TLS SNI / server name for the broker connection (SSL / `SASL_SSL`).
     pub kafka_tls_server_name: Option<String>,
+}
+
+impl std::fmt::Debug for SecurityCliInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SecurityCliInput")
+    }
 }
 
 /// JWKS key-set handle plus the metadata the binary needs to drive the
@@ -145,6 +157,17 @@ impl std::ops::Deref for SecurityOutput {
 /// without `tls_key` (or vice versa), or a `SASL_*` protocol missing the
 /// credentials required by its selected mechanism.
 pub fn build_security(input: &SecurityCliInput) -> anyhow::Result<SecurityOutput> {
+    if (input.require_auth || input.authz)
+        && input.forward_secret.as_deref().is_none_or(str::is_empty)
+    {
+        anyhow::bail!(
+            "--forward-secret is required when authentication or authorization is enabled"
+        );
+    }
+    if let Some(secret) = &input.forward_secret {
+        reqwest::header::HeaderValue::from_str(secret)
+            .map_err(|_| anyhow::anyhow!("--forward-secret is not a valid HTTP header value"))?;
+    }
     let (bearer, jwks_handle) = build_bearer(input)?;
     Ok(SecurityOutput {
         config: SecurityConfig {
@@ -154,6 +177,7 @@ pub fn build_security(input: &SecurityCliInput) -> anyhow::Result<SecurityOutput
             bearer,
             tls: build_tls(input)?,
             authz: build_authz(input),
+            forward_secret: input.forward_secret.clone(),
             client: build_client_security(input)?,
         },
         jwks_handle,
@@ -178,6 +202,7 @@ fn build_basic(input: &SecurityCliInput) -> Option<BasicAuthConfig> {
     Some(BasicAuthConfig {
         users,
         file: input.basic_auth_file.clone(),
+        required_roles: input.auth_roles.iter().cloned().collect(),
     })
 }
 
@@ -191,7 +216,7 @@ fn build_bearer(
         "off" => Ok((None, None)),
         "unsecured" => {
             let validator =
-                OAuthBearerValidator::Unsecured(crabka_security::UnsecuredJwsValidator {
+                OAuthBearerValidator::Unsecured(krabka_security::UnsecuredJwsValidator {
                     principal_claim_name: input.bearer_principal_claim.clone(),
                     ..Default::default()
                 });
@@ -348,9 +373,21 @@ fn build_sasl(input: &SecurityCliInput) -> anyhow::Result<SaslCredentials> {
             let username = input.kafka_sasl_username.clone().ok_or_else(|| {
                 anyhow::anyhow!("--kafka-sasl-username required for SASL_* protocols")
             })?;
-            let password = input.kafka_sasl_password.clone().ok_or_else(|| {
-                anyhow::anyhow!("--kafka-sasl-password required for SASL_* protocols")
-            })?;
+            let password = match (&input.kafka_sasl_password, &input.kafka_sasl_password_file) {
+                (Some(_), Some(_)) => anyhow::bail!(
+                    "--kafka-sasl-password and --kafka-sasl-password-file are mutually exclusive"
+                ),
+                (Some(password), None) => password.clone(),
+                (None, Some(path)) => std::fs::read_to_string(path)
+                    .map_err(|error| {
+                        anyhow::anyhow!("read Kafka SASL password {}: {error}", path.display())
+                    })?
+                    .trim_end_matches(['\r', '\n'])
+                    .to_owned(),
+                (None, None) => anyhow::bail!(
+                    "--kafka-sasl-password or --kafka-sasl-password-file required for SASL_* protocols"
+                ),
+            };
             match mechanism {
                 "PLAIN" => Ok(SaslCredentials::Plain { username, password }),
                 "SCRAM-SHA-256" => Ok(SaslCredentials::Scram {
@@ -413,9 +450,42 @@ mod tests {
                 s.bearer.is_none(),
                 s.tls.is_none(),
                 s.authz.is_none(),
+                s.forward_secret.is_none(),
                 s.client.is_none(),
-            ) == (false, true, true, true, true, true, true)
+            ) == (false, true, true, true, true, true, true, true)
         );
+    }
+
+    #[test]
+    fn secured_nodes_require_a_forward_secret() {
+        for secured in [
+            SecurityCliInput {
+                require_auth: true,
+                ..input()
+            },
+            SecurityCliInput {
+                authz: true,
+                ..input()
+            },
+        ] {
+            let error = build_security(&secured).unwrap_err().to_string();
+            assert2::assert!(error.contains("--forward-secret is required"));
+        }
+
+        let output = build_security(&SecurityCliInput {
+            require_auth: true,
+            forward_secret: Some("shared-secret".into()),
+            ..input()
+        })
+        .unwrap();
+        assert2::assert!(output.config.forward_secret.as_deref() == Some("shared-secret"));
+
+        let invalid = SecurityCliInput {
+            require_auth: true,
+            forward_secret: Some("line\nbreak".into()),
+            ..input()
+        };
+        assert2::assert!(build_security(&invalid).is_err());
     }
 
     #[test]
@@ -423,6 +493,7 @@ mod tests {
         let s = sec(&SecurityCliInput {
             require_auth: true,
             realm: "MyRealm".to_string(),
+            forward_secret: Some("shared-secret".into()),
             ..input()
         });
         assert2::assert!(s.require_auth);
@@ -494,6 +565,16 @@ mod tests {
                     .collect()
         );
         assert2::assert!(b.file == Some(path));
+    }
+
+    #[test]
+    fn security_input_debug_redacts_credentials() {
+        let value = SecurityCliInput {
+            basic_users: vec!["alice:basic-secret".into()],
+            kafka_sasl_password: Some("sasl-secret".into()),
+            ..input()
+        };
+        assert2::assert!(format!("{value:?}") == "SecurityCliInput");
     }
 
     // ---- bearer ----------------------------------------------------------
@@ -597,6 +678,7 @@ mod tests {
     fn authz_enabled_builds_config() {
         let s = sec(&SecurityCliInput {
             authz: true,
+            forward_secret: Some("shared-secret".into()),
             super_users: vec!["admin".to_string(), "root".to_string()],
             acl_refresh: Some(secs(45)),
             ..input()
@@ -617,6 +699,7 @@ mod tests {
     fn authz_default_refresh() {
         let s = sec(&SecurityCliInput {
             authz: true,
+            forward_secret: Some("shared-secret".into()),
             ..input()
         });
         let a = s.authz.expect("authz enabled");
@@ -692,6 +775,29 @@ mod tests {
         assert2::assert!(c.tls.is_none());
         assert2::assert!(credentials.0.as_str() == "u");
         assert2::assert!(credentials.1.as_str() == "p");
+    }
+
+    #[test]
+    fn client_sasl_password_file_is_read_and_conflicts_with_inline_password() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "from-file\r\n").unwrap();
+        let from_file = SecurityCliInput {
+            kafka_security_protocol: "SASL_PLAINTEXT".into(),
+            kafka_sasl_username: Some("u".into()),
+            kafka_sasl_password_file: Some(file.path().to_owned()),
+            ..input()
+        };
+        let client = sec(&from_file).client.unwrap();
+        assert2::assert!(matches!(
+            client.sasl,
+            Some(SaslCredentials::Plain { password, .. }) if password == "from-file"
+        ));
+
+        let conflict = SecurityCliInput {
+            kafka_sasl_password: Some("inline".into()),
+            ..from_file
+        };
+        assert2::assert!(build_security(&conflict).is_err());
     }
 
     #[test]

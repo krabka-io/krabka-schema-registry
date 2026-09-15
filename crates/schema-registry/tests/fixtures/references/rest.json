@@ -128,7 +128,44 @@
   },
   {
     "body": {
+      "compatibility": "NONE"
+    },
+    "method": "PUT",
+    "op": "protobuf_disable_base_compat",
+    "path": "/config/pb_money",
+    "status": 200
+  },
+  {
+    "body": {
       "id": 5
+    },
+    "method": "POST",
+    "op": "protobuf_register_changed_base",
+    "path": "/subjects/pb_money/versions",
+    "status": 200
+  },
+  {
+    "body": {
+      "compatibility": "BACKWARD"
+    },
+    "method": "PUT",
+    "op": "protobuf_set_referrer_backward",
+    "path": "/config/pb_order",
+    "status": 200
+  },
+  {
+    "body": {
+      "error_code": 409,
+      "message": "Schema being registered is incompatible with an earlier schema for subject \"pb_order\", details: [{errorType:\"FIELD_SCALAR_KIND_CHANGED\", description:\"The kind of a SCALAR field at path '#/Money/1' in the new schema does not match its kind in the old schema\"}, {errorType:\"FIELD_NAMED_TYPE_CHANGED\", description:\"The type of a MESSAGE field at path '#/Order/1' in the new schema does not match its type in the old schema\"}, {oldSchemaVersion: 1}, {oldSchema: 'syntax = \"proto3\";\n\nimport \"money.proto\";\n\nmessage Order {\n  m.Money price = 1;\n}\n'}, {compatibility: 'BACKWARD'}]"
+    },
+    "method": "POST",
+    "op": "protobuf_changed_reference_rejected",
+    "path": "/subjects/pb_order/versions",
+    "status": 409
+  },
+  {
+    "body": {
+      "id": 6
     },
     "method": "POST",
     "op": "json_register_base",
@@ -137,7 +174,7 @@
   },
   {
     "body": {
-      "id": 6
+      "id": 7
     },
     "method": "POST",
     "op": "json_register_referrer",
@@ -158,12 +195,12 @@
     },
     "method": "GET",
     "op": "json_get_referrer_by_id",
-    "path": "/schemas/ids/6",
+    "path": "/schemas/ids/7",
     "status": 200
   },
   {
     "body": [
-      6
+      7
     ],
     "method": "GET",
     "op": "json_base_v1_referencedby",

@@ -1,19 +1,19 @@
-# Crabka Schema Registry — Slice 5: HA (cp-exact Kafka-group election + write-forwarding) — design
+# Krabka Schema Registry — Slice 5: HA (cp-exact Kafka-group election + write-forwarding) — design
 
 - **Date:** 2026-06-06
 - **Status:** Approved (brainstorm); ready for an implementation plan
 - **Builds on:** slices 1+2+2b+2c+3+4 (registry + compat trilogy + deletes/modes/lookups + references). The `KafkaStore` facade (single-node always-primary, write-gate + group-less reader), the axum REST surface, and `RegistryConfig`/the binary all exist. Stacks on slice 4 (PR #410).
-- **Parent roadmap:** `docs/superpowers/specs/2026-06-04-crabka-schema-registry-design.md` (slice 5).
+- **Parent roadmap:** `docs/superpowers/specs/2026-06-04-krabka-schema-registry-design.md` (slice 5).
 
 ## Motivation
 
-Today the registry is **single-node always-primary**: the `KafkaStore` facade takes a write-gate and is the sole writer of `_schemas`. Slice 5 makes it **multi-node HA**: registry nodes coordinate so exactly one is the **primary** (writer); secondaries serve reads and **forward** mutating REST requests (POST/PUT/DELETE) to the primary; **failover** when the primary dies. This matches Confluent SR, which elects a primary via a Kafka consumer-group ("primary election") where the group leader becomes the SR primary and each node advertises its REST URL in the JoinGroup metadata so secondaries can forward. We match cp's election wire **byte-exactly** so a mixed cp+Crabka SR cluster can co-elect one primary through the Crabka broker — the ultimate fidelity test, consistent with the program's cp-byte-exactness discipline.
+Today the registry is **single-node always-primary**: the `KafkaStore` facade takes a write-gate and is the sole writer of `_schemas`. Slice 5 makes it **multi-node HA**: registry nodes coordinate so exactly one is the **primary** (writer); secondaries serve reads and **forward** mutating REST requests (POST/PUT/DELETE) to the primary; **failover** when the primary dies. This matches Confluent SR, which elects a primary via a Kafka consumer-group ("primary election") where the group leader becomes the SR primary and each node advertises its REST URL in the JoinGroup metadata so secondaries can forward. We match cp's election wire **byte-exactly** so a mixed cp+Krabka SR cluster can co-elect one primary through the Krabka broker — the ultimate fidelity test, consistent with the program's cp-byte-exactness discipline.
 
 ## Load-bearing decisions
 
 | Decision | Choice | Rationale |
 |---|---|---|
-| **Election fidelity** | **cp-exact `"sr"` wire** — the JoinGroup metadata (`SchemaRegistryIdentity`) + SyncGroup assignment (`SchemaRegistryGroupAssignment`) match cp-schema-registry 7.4.0 byte-exactly, Docker-captured. | A mixed cp+Crabka SR cluster co-elects one primary; consistent with every prior slice matching cp. The broker coordinator is already protocol-type-generic, so this needs only the right metadata bytes. |
+| **Election fidelity** | **cp-exact `"sr"` wire** — the JoinGroup metadata (`SchemaRegistryIdentity`) + SyncGroup assignment (`SchemaRegistryGroupAssignment`) match cp-schema-registry 7.4.0 byte-exactly, Docker-captured. | A mixed cp+Krabka SR cluster co-elects one primary; consistent with every prior slice matching cp. The broker coordinator is already protocol-type-generic, so this needs only the right metadata bytes. |
 | **Election client** | A **self-contained `election` module** in the schema-registry crate, implementing the `"sr"` group-membership loop directly over `client-core`'s generic `Client::send`. | Focused on the SR's needs; doesn't refactor `client-consumer` (which would risk consumer regressions). Rejected: extracting a shared group-membership crate (bigger refactor); a `_schemas`-topic leader lease (not cp-faithful). |
 | **Scope** | **Full HA in one slice** — election + forwarding + failover + multi-node conformance + the cp election capture. | The parts are coupled (election without forwarding is an unsafe multi-writer; failover falls out of a correct election client). User chose one slice. |
 | **Forwarding** | An axum **middleware** that proxies mutating REST from a secondary to the primary's advertised URL via `reqwest`. | The `grpc-gateway` `Forwarder` is a proven pattern; reads + primary-side writes pass through unchanged. |
@@ -21,7 +21,7 @@ Today the registry is **single-node always-primary**: the `KafkaStore` facade ta
 
 ## Architecture
 
-Each node runs an **election task** that joins a `"sr"` Kafka group via the Crabka broker's (protocol-generic) coordinator, advertising its REST URL. The coordinator picks a group leader; the leader deterministically selects the **primary** among eligible members and broadcasts the primary's identity in every member's SyncGroup assignment. The election task publishes a shared `PrimaryState { is_primary, primary_url }` over a `watch` channel. An axum **forwarding middleware** wraps the router: a mutating request on a non-primary node is proxied to `primary_url`; reads and primary-side writes pass through. The `KafkaStore` write-gate is unchanged — it is now only ever exercised on the primary, so there is exactly one `_schemas` writer.
+Each node runs an **election task** that joins a `"sr"` Kafka group via the Krabka broker's (protocol-generic) coordinator, advertising its REST URL. The coordinator picks a group leader; the leader deterministically selects the **primary** among eligible members and broadcasts the primary's identity in every member's SyncGroup assignment. The election task publishes a shared `PrimaryState { is_primary, primary_url }` over a `watch` channel. An axum **forwarding middleware** wraps the router: a mutating request on a non-primary node is proxied to `primary_url`; reads and primary-side writes pass through. The `KafkaStore` write-gate is unchanged — it is now only ever exercised on the primary, so there is exactly one `_schemas` writer.
 
 ```
 node N: election task ── JoinGroup{protocol_type:"sr", metadata=SchemaRegistryIdentity} ──► broker coordinator
@@ -44,7 +44,7 @@ cp's `SchemaRegistryProtocol` types, serialized byte-exactly (JSON; exact field 
 
 ### The group-membership client (`election/client.rs`)
 
-A loop over `crabka_client_core::Client::send` (generic over `ProtocolRequest`), using the codecs in `crabka_protocol::owned::{join_group_request, sync_group_request, heartbeat_request, leave_group_request, find_coordinator_request}`:
+A loop over `krabka_client_core::Client::send` (generic over `ProtocolRequest`), using the codecs in `krabka_protocol::owned::{join_group_request, sync_group_request, heartbeat_request, leave_group_request, find_coordinator_request}`:
 1. `FindCoordinator(group_id)` → the group-coordinator broker.
 2. `JoinGroup{ group_id, protocol_type:"sr", protocols:[{ name, metadata: identity_bytes }], member_id, session_timeout, rebalance_timeout }` → assigned `member_id`, `generation_id`, `leader_id`, and (if leader) the members + their metadata.
 3. If **leader**: decode each member's `SchemaRegistryIdentity`, run the selection rule, encode each member's `SchemaRegistryGroupAssignment`, send them in `SyncGroup`. If **follower**: `SyncGroup` with an empty assignment list → receive our assignment.
@@ -77,7 +77,7 @@ An axum `from_fn`/`from_fn_with_state` layer holding `{ primary: watch::Receiver
 
 ## Validation
 
-- **`capture_election_fixtures.rs`** (`#[ignore]`, Docker): start **two** real `cp-schema-registry:7.4.0` nodes both pointed at the Crabka broker with the same `group.id`; wait for them to form the `"sr"` group and elect a primary; then `DescribeGroups("sr"-group)` (admin API) to read each member's **metadata** + **assignment** bytes → `tests/fixtures/election/*.json`. Assert (a) our `SchemaRegistryIdentity`/`SchemaRegistryGroupAssignment` encoders reproduce cp's bytes byte-exactly, (b) cp's two nodes successfully elect exactly one primary **through the Crabka coordinator** (proving the broker runs the `"sr"` group), and (c) the captured `protocol_type`/protocol-name/selection-rule. (If `DescribeGroups` doesn't surface assignment bytes, fall back to a broker-side coordinator log hook.)
+- **`capture_election_fixtures.rs`** (`#[ignore]`, Docker): start **two** real `cp-schema-registry:7.4.0` nodes both pointed at the Krabka broker with the same `group.id`; wait for them to form the `"sr"` group and elect a primary; then `DescribeGroups("sr"-group)` (admin API) to read each member's **metadata** + **assignment** bytes → `tests/fixtures/election/*.json`. Assert (a) our `SchemaRegistryIdentity`/`SchemaRegistryGroupAssignment` encoders reproduce cp's bytes byte-exactly, (b) cp's two nodes successfully elect exactly one primary **through the Krabka coordinator** (proving the broker runs the `"sr"` group), and (c) the captured `protocol_type`/protocol-name/selection-rule. (If `DescribeGroups` doesn't surface assignment bytes, fall back to a broker-side coordinator log hook.)
 - **`ha.rs`** (in-process, Mac-friendly, no Docker): boot one in-process broker; start **2–3** registry nodes (each a `KafkaStore` + router + election task) on distinct `127.0.0.1` ports. Assert: exactly one primary elected; `POST` to a **secondary** forwards to the primary and the write lands (a subsequent GET reflects it on every node); reads served on all; **failover** — stop the primary's election task → a new primary is elected → writes resume on the new primary (and a secondary's forward now targets it).
 - **Election unit tests**: `SchemaRegistryIdentity`/assignment serde round-trip + byte-shape vs the captured cp bytes; the leader primary-selection rule (deterministic master among eligible members); the forwarding middleware's primary/secondary/loop-guard branches.
 
@@ -105,4 +105,4 @@ An axum `from_fn`/`from_fn_with_state` layer holding `{ primary: watch::Receiver
 
 ## Dependencies
 
-No new external crates beyond promoting `reqwest` (already a dev-dep + a prod dep elsewhere in the workspace) to `[dependencies]`. Reuses `crabka_client_core::Client` (generic `send`), the `crabka_protocol::owned` group-membership codecs, the broker's protocol-generic coordinator, and `axum`/`watch`. The Docker capture uses the existing `testcontainers` + `cp-schema-registry:7.4.0` setup.
+No new external crates beyond promoting `reqwest` (already a dev-dep + a prod dep elsewhere in the workspace) to `[dependencies]`. Reuses `krabka_client_core::Client` (generic `send`), the `krabka_protocol::owned` group-membership codecs, the broker's protocol-generic coordinator, and `axum`/`watch`. The Docker capture uses the existing `testcontainers` + `cp-schema-registry:7.4.0` setup.
