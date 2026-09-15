@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use krabka_client_admin::{AdminClient, AdminError, CreateTopicSpec};
+use krabka_client_admin::{AdminClient, AdminError, CreateTopicSpec, TopicMutationOptions};
 use krabka_client_core::{ClientError, ClientSecurity};
 use krabka_protocol::primitives::uuid::Uuid as WireUuid;
 use krabka_units::prelude::*;
@@ -74,19 +74,21 @@ pub async fn ensure_schemas_topic(
     let mut admin = AdminClient::connect_with_options(
         &bootstrap,
         krabka_client_core::ConnectionOptions {
-            dns_timeout: krabka_client_core::ClientDnsTimeout::default(),
-            connect_timeout: krabka_units::secs(5),
+            socket_connection_setup_timeout: krabka_units::secs(5),
             request_timeout: krabka_units::secs(30),
             client_id: "krabka-operator".to_owned(),
             dispatch_queue_capacity: cfg.runtime.client_dispatch_queue_capacity,
             frame_max: cfg.runtime.client_frame_max,
             security: security.map(Box::new),
+            ..krabka_client_core::ConnectionOptions::default()
         },
     )
     .await?;
 
     let (spec, timeout) = schemas_topic_spec(cfg);
-    let outcomes = admin.create_topics(&[spec], timeout).await?;
+    let outcomes = admin
+        .create_topics(&[spec], TopicMutationOptions::with_timeout(timeout))
+        .await?;
     if let Some(o) = outcomes.into_iter().next() {
         match o.error {
             None => {}
