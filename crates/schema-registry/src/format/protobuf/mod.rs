@@ -101,9 +101,24 @@ pub fn check(
         if writer_ref.schema == reader_ref.schema {
             continue;
         }
-        let writer_ref = parse(&writer_ref.schema, writer_refs)
+        // Parse each reference against its own transitive dependencies, not
+        // the full reference closure. The closure includes the reference
+        // itself, so parsing it under its own name a second time would give
+        // the descriptor pool the same fully qualified messages twice and
+        // fail to link.
+        let writer_ref_deps: Vec<super::ResolvedReference> = writer_refs
+            .iter()
+            .filter(|r| r.name != writer_ref.name)
+            .cloned()
+            .collect();
+        let reader_ref_deps: Vec<super::ResolvedReference> = reader_refs
+            .iter()
+            .filter(|r| r.name != reader_ref.name)
+            .cloned()
+            .collect();
+        let writer_ref = parse(&writer_ref.schema, &writer_ref_deps)
             .map_err(|error| vec![format!("writer reference: {error}")])?;
-        let reader_ref = parse(&reader_ref.schema, reader_refs)
+        let reader_ref = parse(&reader_ref.schema, &reader_ref_deps)
             .map_err(|error| vec![format!("reader reference: {error}")])?;
         diffs.extend(diff::compare(
             writer_ref.descriptor(),
@@ -401,6 +416,30 @@ mod tests {
             .is_ok()
         );
         assert2::assert!(check(candidate, candidate, &[changed], &[old]).is_err());
+    }
+
+    /// Regression: a reference is parsed against its own transitive
+    /// dependencies, not the full closure that includes the reference
+    /// itself. Before the fix, `check` always rejected a changed reference,
+    /// even one whose change was backward compatible, because linking the
+    /// reference against a closure that repeats its own fully qualified
+    /// messages failed.
+    #[test]
+    fn protobuf_reference_check_accepts_a_compatible_reference_change() {
+        use crate::format::{ResolvedReference, SchemaType};
+        let candidate =
+            "syntax = \"proto3\"; import \"money.proto\"; message Order { m.Money price = 1; }";
+        let reference = |schema: &str| ResolvedReference {
+            name: "money.proto".into(),
+            ty: SchemaType::Protobuf,
+            schema: schema.into(),
+        };
+        let old = reference("syntax = \"proto3\"; package m; message Money { int64 cents = 1; }");
+        let compatible = reference(
+            "syntax = \"proto3\"; package m; message Money { int64 cents = 1; string currency = 2; }",
+        );
+
+        assert2::assert!(check(candidate, candidate, &[compatible], &[old]).is_ok());
     }
 
     #[test]
