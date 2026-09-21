@@ -2,7 +2,7 @@ name: ci
 on:
   pull_request:
   push:
-    branches: [claude/broker-schema-validation-registry-s451bp]
+    branches: [main]
   schedule:
     - cron: "17 4 * * 1"
   workflow_dispatch:

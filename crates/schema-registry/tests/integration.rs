@@ -15,7 +15,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use krabka_broker::{BootstrapMode, Broker, BrokerConfig, BrokerHandle, NodeId};
-use krabka_client_admin::{AdminClient, CreateTopicSpec};
+use krabka_client_admin::{AdminClient, CreateTopicSpec, TopicMutationOptions};
 use krabka_client_core::Client;
 use krabka_schema_registry::{
     config::{RegistryConfig, SecurityConfig},
@@ -166,7 +166,7 @@ async fn startup_rejects_invalid_schema_topic_layout() {
                     configs: BTreeMap::from([("cleanup.policy".into(), "delete".into())]),
                 },
             ],
-            krabka_units::secs(10),
+            TopicMutationOptions::with_timeout(krabka_units::secs(10)),
         )
         .await
         .unwrap();
@@ -214,7 +214,7 @@ async fn reader_routes_to_schema_partition_leader() {
                 replicas: 3,
                 configs: BTreeMap::from([("cleanup.policy".into(), "compact".into())]),
             }],
-            krabka_units::secs(10),
+            TopicMutationOptions::with_timeout(krabka_units::secs(10)),
         )
         .await
         .unwrap();
