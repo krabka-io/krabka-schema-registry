@@ -66,6 +66,8 @@ pub struct SchemaValue {
     pub schema: String,
     #[serde(default)]
     pub deleted: bool,
+    #[serde(flatten, default)]
+    pub extra: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 /// A schema reference embedded in a [`SchemaValue`].
@@ -125,6 +127,22 @@ pub struct DeleteSubjectValue {
     pub version: SchemaVersion,
 }
 
+/// Krabka's durable per-subject version marker. It uses Confluent's `NOOP`
+/// key type so other registries safely ignore it while log compaction retains
+/// one marker per subject.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VersionHighWaterKey {
+    pub keytype: String,
+    pub subject: String,
+    pub magic: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VersionHighWaterValue {
+    #[serde(rename = "nextVersion")]
+    pub next_version: SchemaVersion,
+}
+
 /// A decoded `_schemas` record.
 ///
 /// Unknown key-types and tombstones decode to a non-panicking variant. The
@@ -139,10 +157,16 @@ pub enum SchemaRecord {
     Mode(ModeKey, Option<ModeValue>),
     /// A soft subject-delete marker.
     DeleteSubject(DeleteSubjectKey, DeleteSubjectValue),
+    VersionHighWater(VersionHighWaterKey, VersionHighWaterValue),
     /// A `SCHEMA` key with a null value = permanent version delete.
     Tombstone(SchemaKey),
     Noop,
-    Unknown,
+    Unknown {
+        keytype: String,
+    },
+    Undecodable {
+        keytype: Option<String>,
+    },
 }
 
 impl SchemaRecord {
@@ -152,44 +176,78 @@ impl SchemaRecord {
     #[must_use]
     pub fn decode(key: &[u8], value: Option<&[u8]>) -> Self {
         let Ok(kv) = serde_json::from_slice::<serde_json::Value>(key) else {
-            return Self::Unknown;
+            return Self::Undecodable { keytype: None };
         };
-        match kv.get("keytype").and_then(|v| v.as_str()) {
+        let keytype = kv.get("keytype").and_then(|v| v.as_str());
+        match keytype {
             Some("SCHEMA") => match serde_json::from_slice::<SchemaKey>(key) {
                 Ok(k) => match value {
                     Some(v) => match serde_json::from_slice::<SchemaValue>(v) {
                         Ok(val) => Self::Schema(k, val),
-                        Err(_) => Self::Unknown,
+                        Err(_) => Self::Undecodable {
+                            keytype: Some("SCHEMA".into()),
+                        },
                     },
                     None => Self::Tombstone(k), // null value = permanent version delete
                 },
-                Err(_) => Self::Unknown,
+                Err(_) => Self::Undecodable {
+                    keytype: Some("SCHEMA".into()),
+                },
             },
             Some("CONFIG") => match serde_json::from_slice::<ConfigKey>(key) {
-                Ok(k) => match value.and_then(|v| serde_json::from_slice::<ConfigValue>(v).ok()) {
-                    Some(val) => Self::Config(k, Some(val)),
-                    None => Self::Config(k, None), // null value = clear config override
+                Ok(k) => match value {
+                    Some(v) => match serde_json::from_slice::<ConfigValue>(v) {
+                        Ok(val) => Self::Config(k, Some(val)),
+                        Err(_) => Self::Undecodable {
+                            keytype: Some("CONFIG".into()),
+                        },
+                    },
+                    None => Self::Config(k, None),
                 },
-                Err(_) => Self::Unknown,
+                Err(_) => Self::Undecodable {
+                    keytype: Some("CONFIG".into()),
+                },
             },
             Some("MODE") => match serde_json::from_slice::<ModeKey>(key) {
-                Ok(k) => match value.and_then(|v| serde_json::from_slice::<ModeValue>(v).ok()) {
-                    Some(val) => Self::Mode(k, Some(val)),
-                    None => Self::Mode(k, None), // null value = clear mode override
+                Ok(k) => match value {
+                    Some(v) => match serde_json::from_slice::<ModeValue>(v) {
+                        Ok(val) => Self::Mode(k, Some(val)),
+                        Err(_) => Self::Undecodable {
+                            keytype: Some("MODE".into()),
+                        },
+                    },
+                    None => Self::Mode(k, None),
                 },
-                Err(_) => Self::Unknown,
+                Err(_) => Self::Undecodable {
+                    keytype: Some("MODE".into()),
+                },
             },
-            Some("DELETE_SUBJECT") => match (
-                serde_json::from_slice::<DeleteSubjectKey>(key),
-                value.and_then(|v| serde_json::from_slice::<DeleteSubjectValue>(v).ok()),
+            Some("DELETE_SUBJECT") => match serde_json::from_slice::<DeleteSubjectKey>(key) {
+                Ok(k) => match value {
+                    Some(v) => match serde_json::from_slice::<DeleteSubjectValue>(v) {
+                        Ok(value) => Self::DeleteSubject(k, value),
+                        Err(_) => Self::Undecodable {
+                            keytype: Some("DELETE_SUBJECT".into()),
+                        },
+                    },
+                    None => Self::Noop,
+                },
+                Err(_) => Self::Undecodable {
+                    keytype: Some("DELETE_SUBJECT".into()),
+                },
+            },
+            Some("NOOP") => match (
+                serde_json::from_slice::<VersionHighWaterKey>(key),
+                value.and_then(|v| serde_json::from_slice::<VersionHighWaterValue>(v).ok()),
             ) {
-                (Ok(k), Some(val)) => Self::DeleteSubject(k, val),
-                // a DELETE_SUBJECT tombstone: the versions are removed by their
-                // own SCHEMA tombstones, so this marker is a no-op on replay.
+                (Ok(k), Some(v)) => Self::VersionHighWater(k, v),
                 _ => Self::Noop,
             },
-            Some("NOOP" | "CLEAR_SUBJECTS" | "CLEAR_SUBJECT") => Self::Noop,
-            _ => Self::Unknown,
+            Some("CLEAR_SUBJECTS" | "CLEAR_SUBJECT") => Self::Noop,
+            Some(keytype) => Self::Unknown {
+                keytype: keytype.to_string(),
+            },
+            None => Self::Undecodable { keytype: None },
         }
     }
 }
@@ -231,6 +289,7 @@ struct SchemaRecordParts<'a> {
     references: &'a [SchemaReference],
     message_type: Option<&'a str>,
     deleted: bool,
+    extra: Option<&'a std::collections::BTreeMap<String, serde_json::Value>>,
 }
 
 fn schema_kv(record: SchemaRecordParts<'_>) -> (Vec<u8>, Vec<u8>) {
@@ -244,6 +303,7 @@ fn schema_kv(record: SchemaRecordParts<'_>) -> (Vec<u8>, Vec<u8>) {
         references: record.references.to_vec(),
         schema: record.schema.to_string(),
         deleted: record.deleted,
+        extra: record.extra.cloned().unwrap_or_default(),
     };
     (
         serde_json::to_vec(&key).expect("key serialises"),
@@ -270,10 +330,11 @@ pub fn encode_schema(
         references,
         message_type: None,
         deleted: false,
+        extra: None,
     })
 }
 
-/// Build a `SCHEMA` record carrying optional Crabka protobuf message binding
+/// Build a `SCHEMA` record carrying optional Krabka protobuf message binding
 /// metadata. `message_type = None` preserves the Confluent-compatible value
 /// shape.
 #[must_use]
@@ -295,6 +356,7 @@ pub fn encode_schema_with_message_type(
         references,
         message_type,
         deleted: false,
+        extra: None,
     })
 }
 
@@ -319,6 +381,7 @@ pub fn encode_schema_deleted(
         references,
         message_type: None,
         deleted: true,
+        extra: None,
     })
 }
 
@@ -332,7 +395,10 @@ pub fn encode_schema_deleted_with_message_type(
     ty: SchemaType,
     schema: &str,
     references: &[SchemaReference],
-    message_type: Option<&str>,
+    metadata: (
+        Option<&str>,
+        &std::collections::BTreeMap<String, serde_json::Value>,
+    ),
 ) -> (Vec<u8>, Vec<u8>) {
     schema_kv(SchemaRecordParts {
         subject,
@@ -341,8 +407,9 @@ pub fn encode_schema_deleted_with_message_type(
         ty,
         schema,
         references,
-        message_type,
+        message_type: metadata.0,
         deleted: true,
+        extra: Some(metadata.1),
     })
 }
 
@@ -354,6 +421,22 @@ pub fn encode_schema_deleted_with_message_type(
 /// Panics if a schema previously validated by the registry is missing a definition or dependency required during resolution.
 pub fn encode_tombstone(subject: &str, version: SchemaVersion) -> Vec<u8> {
     serde_json::to_vec(&SchemaKey::new(subject, version)).expect("schema key serialises")
+}
+
+#[must_use]
+/// # Panics
+/// Panics only if serialising these plain record structs fails.
+pub fn encode_version_high_water(subject: &str, next_version: SchemaVersion) -> (Vec<u8>, Vec<u8>) {
+    let key = VersionHighWaterKey {
+        keytype: "NOOP".to_string(),
+        subject: subject.to_string(),
+        magic: 0,
+    };
+    let value = VersionHighWaterValue { next_version };
+    (
+        serde_json::to_vec(&key).expect("version marker key serialises"),
+        serde_json::to_vec(&value).expect("version marker value serialises"),
+    )
 }
 
 /// Build a `MODE` record's (key, value). `subject = None` is the global mode.
@@ -459,6 +542,18 @@ mod tests {
         }
         let (gk, _gv) = encode_mode(None, "IMPORT");
         assert2::assert!(&gk == br#"{"keytype":"MODE","subject":null,"magic":0}"#);
+    }
+
+    #[test]
+    fn version_high_water_round_trips_as_noop_extension() {
+        let (key, value) = encode_version_high_water("s", sv(4));
+        match SchemaRecord::decode(&key, Some(&value)) {
+            SchemaRecord::VersionHighWater(key, value) => {
+                assert2::assert!(key.subject == "s");
+                assert2::assert!(value.next_version == sv(4));
+            }
+            _ => panic!("expected version high-water record"),
+        }
     }
 
     #[test]

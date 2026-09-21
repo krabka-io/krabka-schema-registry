@@ -1,0 +1,90 @@
+image:
+  # CI publishes this image from //packaging on each push to the default
+  # branch, tagged with the commit SHA and with the workspace version. The
+  # empty tag below selects the workspace version.
+  repository: ghcr.io/krabka-io/krabka-schema-registry
+  tag: "" # defaults to .Chart.AppVersion when empty
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+# Both override the generated resource names. Empty keeps the generated name.
+nameOverride: ""
+fullnameOverride: ""
+
+# REQUIRED for the standalone chart: bootstrap address of the Krabka broker.
+bootstrapServers: ""
+schemasTopic: "_schemas"
+schemasTopicReplicationFactor: 3
+groupId: "schema-registry"
+
+# Client security for the connection from the registry to the broker. The
+# fields match the `kafkaClient` block of the SchemaRegistry CRD, so an
+# operator-managed deployment and this chart take the same values.
+kafkaClient:
+  # PLAINTEXT | SSL | SASL_PLAINTEXT | SASL_SSL
+  securityProtocol: PLAINTEXT
+  sasl:
+    # PLAIN | SCRAM-SHA-256 | SCRAM-SHA-512
+    mechanism: PLAIN
+    # Name of an existing Secret with a `username` key and a `password` key.
+    # A SASL security protocol requires it.
+    secretRef: ""
+  tls:
+    # Name of an existing Secret with a `ca.crt` key that holds the CA the
+    # registry trusts for the broker certificate. Empty uses the system roots.
+    caSecretName: ""
+    # TLS server name (SNI) for the broker connection. Empty uses the host from
+    # bootstrapServers.
+    serverNameOverride: ""
+
+# Probe timing. The names match the `healthChecks` block of the SchemaRegistry
+# CRD. The registry binds the REST port only after it replays the whole
+# `_schemas` topic, so the startup probe must cover the longest replay you
+# expect: startupFailureThreshold x startupPeriodSeconds, 5 minutes by default.
+# The liveness probe starts only after the startup probe passes.
+healthChecks:
+  startupPeriodSeconds: 5
+  startupFailureThreshold: 60
+  readinessInitialDelaySeconds: 2
+  readinessPeriodSeconds: 5
+  livenessInitialDelaySeconds: 5
+  livenessPeriodSeconds: 10
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: "1000m"
+    memory: 512Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
+podLabels: {}
+
+serviceAccount:
+  create: true
+  name: ""
+
+service:
+  type: ClusterIP
+  port: 8081
+
+logFilter: "info"
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]

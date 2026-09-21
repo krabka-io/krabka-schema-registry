@@ -9,12 +9,13 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use crabka_units::prelude::*;
+use krabka_units::prelude::*;
 use tokio::sync::watch;
 
-use crate::election::PrimaryState;
+use crate::{election::PrimaryState, error::SrError};
 
 pub const FORWARD_HEADER: &str = "x-forwarded-for-registry";
+pub const FORWARD_SECRET_HEADER: &str = "x-krabka-forward-secret";
 
 #[derive(Clone)]
 pub struct ForwardState {
@@ -23,6 +24,7 @@ pub struct ForwardState {
     pub node_id: String,
     /// Largest forwarded request body this node buffers before replaying it.
     pub forward_max_body: ByteSize,
+    pub forward_secret: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -64,11 +66,9 @@ pub async fn forward_layer(State(fwd): State<ForwardState>, req: Request, next: 
     match decide(&method, already, &state) {
         Decision::PassThrough => next.run(req).await,
         Decision::Unavailable => {
-            (StatusCode::SERVICE_UNAVAILABLE, "no primary elected").into_response()
+            SrError::UnknownLeader("no primary elected".into()).into_response()
         }
-        Decision::Retriable => {
-            (StatusCode::SERVICE_UNAVAILABLE, "not primary; retry").into_response()
-        }
+        Decision::Retriable => SrError::UnknownLeader("not primary; retry".into()).into_response(),
         Decision::Forward(primary_url) => proxy(&fwd, &primary_url, req).await,
     }
 }
@@ -79,7 +79,7 @@ async fn proxy(fwd: &ForwardState, primary_url: &str, req: Request) -> Response 
     let url = format!("{primary_url}{path_q}");
     // `to_bytes` takes a raw `usize` cap.
     let Ok(bytes) = axum::body::to_bytes(body, fwd.forward_max_body.bytes_usize()).await else {
-        return (StatusCode::BAD_REQUEST, "body read failed").into_response();
+        return SrError::InvalidRequest("body read failed".into()).into_response();
     };
     let method = reqwest::Method::from_bytes(parts.method.as_str().as_bytes())
         .unwrap_or(reqwest::Method::POST);
@@ -94,6 +94,9 @@ async fn proxy(fwd: &ForwardState, primary_url: &str, req: Request) -> Response 
     // could not work for mTLS anyway (a client cert can't be carried on this
     // server-to-server `reqwest` call).
     rb = rb.header(FORWARD_HEADER, &fwd.node_id);
+    if let Some(secret) = &fwd.forward_secret {
+        rb = rb.header(FORWARD_SECRET_HEADER, secret);
+    }
     match rb.send().await {
         Ok(resp) => {
             let status =
@@ -110,7 +113,10 @@ async fn proxy(fwd: &ForwardState, primary_url: &str, req: Request) -> Response 
             }
             out
         }
-        Err(e) => (StatusCode::BAD_GATEWAY, format!("forward failed: {e}")).into_response(),
+        Err(error) => {
+            tracing::warn!(%error, %url, "schema registry request forwarding failed");
+            SrError::ForwardFailed.into_response()
+        }
     }
 }
 
@@ -200,6 +206,7 @@ mod tests {
             http: reqwest::Client::new(),
             node_id: "secondary".into(),
             forward_max_body: bytes(3),
+            forward_secret: None,
         };
         let request = Request::builder()
             .method(Method::POST)

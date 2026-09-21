@@ -9,11 +9,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crabka_units::{fmt::Human as _, prelude::*};
+use krabka_units::{fmt::Human as _, prelude::*};
 
 use crate::{
     error::SchemaSerdeError,
-    registry::RegistryClient,
+    registry::{RegistryClient, model::SchemaReference},
     subject::{Role, SchemaKind, SubjectStrategy, TopicNameStrategy},
 };
 
@@ -26,6 +26,8 @@ use crate::{
 pub struct WriterSchema {
     pub schema: String,
     pub references: HashMap<String, String>,
+    /// Reference names in dependency-first order for parsers such as Avro.
+    pub reference_order: Vec<String>,
 }
 
 /// How the cache resolves serialize-side ids.
@@ -36,6 +38,10 @@ pub enum RegisterMode {
     /// Look up the local schema's id. Never register.
     LookupOnly,
     /// Use the latest registered version's id for the subject.
+    ///
+    /// Pre-warm rejects a latest schema that differs from the local schema.
+    /// This prevents a serializer from framing locally encoded bytes with an
+    /// id for a different writer schema.
     UseLatest,
 }
 
@@ -129,6 +135,7 @@ struct Interned {
     subject: String,
     kind: SchemaKind,
     schema: String,
+    references: Vec<SchemaReference>,
     message_type: Option<String>,
 }
 
@@ -253,16 +260,24 @@ impl SchemaCache {
         subject: &str,
         kind: SchemaKind,
         schema: &str,
+        references: &[SchemaReference],
         message_type: Option<&str>,
     ) {
         let mut g = self.inner.lock().unwrap();
-        if g.interned.iter().any(|i| i.subject == subject) {
+        if g.interned.iter().any(|i| {
+            i.subject == subject
+                && i.kind == kind
+                && i.schema == schema
+                && i.references == references
+                && i.message_type.as_deref() == message_type
+        }) {
             return;
         }
         g.interned.push(Interned {
             subject: subject.to_string(),
             kind,
             schema: schema.to_string(),
+            references: references.to_vec(),
             message_type: message_type.map(str::to_string),
         });
     }
@@ -283,13 +298,22 @@ impl SchemaCache {
                 RegisterMode::AutoRegister => {
                     let id = self
                         .client
-                        .register(&i.subject, i.kind, &i.schema, i.message_type.as_deref())
+                        .register(
+                            &i.subject,
+                            i.kind,
+                            &i.schema,
+                            &i.references,
+                            i.message_type.as_deref(),
+                        )
                         .await?;
+                    let (references, reference_order) =
+                        self.client.reference_sources_ordered(&i.references).await?;
                     (
                         id,
                         WriterSchema {
                             schema: i.schema.clone(),
-                            references: HashMap::new(),
+                            references,
+                            reference_order,
                         },
                         i.message_type.clone(),
                     )
@@ -297,25 +321,50 @@ impl SchemaCache {
                 RegisterMode::LookupOnly => {
                     let id = self
                         .client
-                        .lookup(&i.subject, i.kind, &i.schema, i.message_type.as_deref())
+                        .lookup(
+                            &i.subject,
+                            i.kind,
+                            &i.schema,
+                            &i.references,
+                            i.message_type.as_deref(),
+                        )
                         .await?;
+                    let (references, reference_order) =
+                        self.client.reference_sources_ordered(&i.references).await?;
                     (
                         id,
                         WriterSchema {
                             schema: i.schema.clone(),
-                            references: HashMap::new(),
+                            references,
+                            reference_order,
                         },
                         i.message_type.clone(),
                     )
                 }
                 RegisterMode::UseLatest => {
                     let latest = self.client.latest(&i.subject).await?;
-                    let references = self.client.reference_sources(&latest.references).await?;
+                    if !schemas_equivalent(i.kind, &latest.schema, &i.schema)
+                        || SchemaKind::from_wire_name(latest.schema_type.as_deref()) != i.kind
+                        || !references_equivalent(&latest.references, &i.references)
+                        || latest.message_type.as_ref().is_some_and(|message_type| {
+                            i.message_type.as_ref() != Some(message_type)
+                        })
+                    {
+                        return Err(SchemaSerdeError::Schema(format!(
+                            "latest schema for {} differs from the local {:?} schema",
+                            i.subject, i.kind
+                        )));
+                    }
+                    let (references, reference_order) = self
+                        .client
+                        .reference_sources_ordered(&latest.references)
+                        .await?;
                     (
                         latest.id,
                         WriterSchema {
                             schema: latest.schema,
                             references,
+                            reference_order,
                         },
                         latest.message_type,
                     )
@@ -436,7 +485,7 @@ impl SchemaCache {
     /// # Panics
     /// Panics if a schema previously validated by the registry is missing a definition or dependency required during resolution.
     pub fn seed_writer_schema(&self, id: u32, schema: impl Into<String>) {
-        self.seed_writer_schema_with_references(id, schema, HashMap::new());
+        self.seed_writer_schema_with_references(id, schema, &HashMap::new());
     }
 
     /// Test/seed hook: install an id→root schema mapping and named sources.
@@ -448,12 +497,43 @@ impl SchemaCache {
         &self,
         id: u32,
         schema: impl Into<String>,
-        references: HashMap<String, String>,
+        references: &HashMap<String, String>,
+    ) {
+        let mut reference_order: Vec<_> = references.keys().cloned().collect();
+        reference_order.sort();
+        self.seed_writer_schema_with_ordered_references(
+            id,
+            schema,
+            reference_order
+                .into_iter()
+                .map(|name| (name.clone(), references[&name].clone())),
+        );
+    }
+
+    /// Test/seed hook: install dependency-first named reference sources.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the cache mutex is poisoned.
+    pub fn seed_writer_schema_with_ordered_references(
+        &self,
+        id: u32,
+        schema: impl Into<String>,
+        references: impl IntoIterator<Item = (String, String)>,
     ) {
         let schema = schema.into();
+        let references: Vec<_> = references.into_iter().collect();
+        let reference_order = references.iter().map(|(name, _)| name.clone()).collect();
+        let references = references.into_iter().collect();
         let mut g = self.inner.lock().unwrap();
-        g.id_writer_schema
-            .insert(id, WriterSchema { schema, references });
+        g.id_writer_schema.insert(
+            id,
+            WriterSchema {
+                schema,
+                references,
+                reference_order,
+            },
+        );
         g.unavailable_schemas.remove(&id);
         g.retry_after.remove(&id);
         g.retry_attempts.remove(&id);
@@ -494,15 +574,58 @@ impl SchemaCache {
         id: u32,
     ) -> Result<(WriterSchema, Option<String>), SchemaSerdeError> {
         let root = self.client.schema_by_id(id).await?;
-        let sources = self.client.reference_sources(&root.references).await?;
+        let (sources, reference_order) = self
+            .client
+            .reference_sources_ordered(&root.references)
+            .await?;
         Ok((
             WriterSchema {
                 schema: root.schema,
                 references: sources,
+                reference_order,
             },
             root.message_type,
         ))
     }
+}
+
+fn schemas_equivalent(kind: SchemaKind, left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    match kind {
+        SchemaKind::Avro | SchemaKind::Json => serde_json::from_str::<serde_json::Value>(left)
+            .and_then(|left| {
+                serde_json::from_str::<serde_json::Value>(right).map(|right| left == right)
+            })
+            .unwrap_or(false),
+        #[cfg(feature = "protobuf")]
+        SchemaKind::Protobuf => protox_parse::parse("left.proto", left)
+            .and_then(|mut left| {
+                protox_parse::parse("left.proto", right).map(|mut right| {
+                    left.source_code_info = None;
+                    right.source_code_info = None;
+                    left == right
+                })
+            })
+            .unwrap_or(false),
+        #[cfg(not(feature = "protobuf"))]
+        SchemaKind::Protobuf => left == right,
+    }
+}
+
+fn references_equivalent(left: &[SchemaReference], right: &[SchemaReference]) -> bool {
+    let mut left = left
+        .iter()
+        .map(|reference| (&reference.name, &reference.subject, reference.version))
+        .collect::<Vec<_>>();
+    let mut right = right
+        .iter()
+        .map(|reference| (&reference.name, &reference.subject, reference.version))
+        .collect::<Vec<_>>();
+    left.sort_unstable();
+    right.sort_unstable();
+    left == right
 }
 
 #[cfg(test)]
@@ -510,7 +633,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use assert2::check;
-    use crabka_units::prelude::*;
+    use krabka_units::prelude::*;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{body_json, method, path},
@@ -526,8 +649,8 @@ mod tests {
     #[test]
     fn intern_is_idempotent_per_subject() {
         let c = cache();
-        c.intern("orders-value", SchemaKind::Avro, "a", None);
-        c.intern("orders-value", SchemaKind::Avro, "a", None);
+        c.intern("orders-value", SchemaKind::Avro, "a", &[], None);
+        c.intern("orders-value", SchemaKind::Avro, "a", &[], None);
         check!(c.inner.lock().unwrap().interned.len() == 1);
     }
 
@@ -649,6 +772,7 @@ mod tests {
             "orders-value",
             SchemaKind::Protobuf,
             "syntax = \"proto3\";",
+            &[],
             Some("demo.Order"),
         );
 
@@ -697,6 +821,7 @@ mod tests {
             "orders-value",
             SchemaKind::Json,
             r#"{"type":"object"}"#,
+            &[],
             None,
         );
 
@@ -718,26 +843,13 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "id": 52,
                 "version": 4,
-                "schema": "syntax = \"proto3\"; import \"money.proto\";",
+                "schema": "syntax = \"proto3\";",
                 "schemaType": "PROTOBUF",
-                "messageType": "demo.Latest",
-                "references": [{"name": "money.proto", "subject": "money-value", "version": 1}]
+                "messageType": "demo.Local"
             })))
             .expect(1)
             .mount(&server)
             .await;
-        Mock::given(method("GET"))
-            .and(path("/subjects/money-value/versions/1"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": 53,
-                "version": 1,
-                "schema": "syntax = \"proto3\"; package money; message Money {}",
-                "schemaType": "PROTOBUF"
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-
         let c = SchemaCache::new(
             RegistryClient::new(server.uri()),
             CacheConfig {
@@ -749,6 +861,7 @@ mod tests {
             "orders-value",
             SchemaKind::Protobuf,
             "syntax = \"proto3\";",
+            &[],
             Some("demo.Local"),
         );
 
@@ -756,9 +869,154 @@ mod tests {
 
         check!(c.id_for_subject("orders-value") == Some(52));
         let writer_schema = c.writer_schema_with_references(52).unwrap();
-        check!(writer_schema.schema == "syntax = \"proto3\"; import \"money.proto\";");
-        check!(writer_schema.references.contains_key("money.proto"));
-        check!(c.writer_message_type(52).as_deref() == Some("demo.Latest"));
+        check!(writer_schema.schema == "syntax = \"proto3\";");
+        check!(writer_schema.references.is_empty());
+        check!(c.writer_message_type(52).as_deref() == Some("demo.Local"));
+    }
+
+    #[tokio::test]
+    async fn prewarm_use_latest_accepts_absent_confluent_message_type() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/subjects/orders-value/versions/latest"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 53,
+                "version": 1,
+                "schema": "syntax = \"proto3\";",
+                "schemaType": "PROTOBUF"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let c = SchemaCache::new(
+            RegistryClient::new(server.uri()),
+            CacheConfig {
+                mode: RegisterMode::UseLatest,
+                ..CacheConfig::default()
+            },
+        );
+        c.intern(
+            "orders-value",
+            SchemaKind::Protobuf,
+            "syntax = \"proto3\";",
+            &[],
+            Some("demo.Local"),
+        );
+
+        c.prewarm().await.unwrap();
+
+        check!(c.id_for_subject("orders-value") == Some(53));
+        check!(c.writer_message_type(53).is_none());
+    }
+
+    #[tokio::test]
+    async fn use_latest_accepts_semantically_equivalent_schema_text() {
+        for (kind, local, remote) in [
+            (
+                SchemaKind::Avro,
+                r#"{"type":"record","name":"Order","fields":[]}"#,
+                r#"{ "fields": [], "name": "Order", "type": "record" }"#,
+            ),
+            (
+                SchemaKind::Json,
+                r#"{"type":"object","properties":{"id":{"type":"integer"}}}"#,
+                r#"{ "properties": { "id": { "type": "integer" } }, "type": "object" }"#,
+            ),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/subjects/orders-value/versions/latest"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": 54,
+                    "version": 1,
+                    "schema": remote,
+                    "schemaType": kind.wire_name()
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let cache = SchemaCache::new(
+                RegistryClient::new(server.uri()),
+                CacheConfig {
+                    mode: RegisterMode::UseLatest,
+                    ..CacheConfig::default()
+                },
+            );
+            cache.intern("orders-value", kind, local, &[], None);
+
+            cache.prewarm().await.unwrap();
+            check!(cache.id_for_subject("orders-value") == Some(54));
+        }
+    }
+
+    #[test]
+    fn reference_equality_does_not_depend_on_array_order() {
+        let a = SchemaReference {
+            name: "a.proto".into(),
+            subject: "a-value".into(),
+            version: 1,
+        };
+        let b = SchemaReference {
+            name: "b.proto".into(),
+            subject: "b-value".into(),
+            version: 2,
+        };
+        check!(references_equivalent(&[a.clone(), b.clone()], &[b, a]));
+    }
+
+    #[test]
+    fn exact_referenced_avro_and_protobuf_defaults_are_compared_safely() {
+        let referenced_avro =
+            r#"{"type":"record","name":"Invoice","fields":[{"name":"total","type":"Money"}]}"#;
+        check!(schemas_equivalent(
+            SchemaKind::Avro,
+            referenced_avro,
+            referenced_avro
+        ));
+        check!(!schemas_equivalent(
+            SchemaKind::Avro,
+            r#"{"type":"bytes","logicalType":"decimal","precision":8,"scale":2}"#,
+            r#"{"type":"bytes","logicalType":"decimal","precision":8,"scale":4}"#,
+        ));
+        check!(!schemas_equivalent(
+            SchemaKind::Protobuf,
+            r#"syntax = "proto2"; message Counter { optional int32 count = 1; }"#,
+            r#"syntax = "proto2"; message Counter { optional int32 count = 1 [default = 5]; }"#,
+        ));
+        check!(schemas_equivalent(
+            SchemaKind::Protobuf,
+            r#"syntax="proto3"; message Ping { string id=1; }"#,
+            r#"syntax = "proto3"; message Ping { string id = 1; }"#,
+        ));
+    }
+
+    #[tokio::test]
+    async fn use_latest_rejects_a_schema_that_differs_from_local_encoding() {
+        for kind in [SchemaKind::Avro, SchemaKind::Protobuf, SchemaKind::Json] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/subjects/orders-value/versions/latest"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": 52,
+                    "version": 4,
+                    "schema": "remote schema",
+                    "schemaType": kind.wire_name()
+                })))
+                .mount(&server)
+                .await;
+            let cache = SchemaCache::new(
+                RegistryClient::new(server.uri()),
+                CacheConfig {
+                    mode: RegisterMode::UseLatest,
+                    ..CacheConfig::default()
+                },
+            );
+            cache.intern("orders-value", kind, "local schema", &[], None);
+
+            let error = cache.prewarm().await.unwrap_err();
+            check!(error.to_string().contains("orders-value"));
+            check!(cache.id_for_subject("orders-value").is_none());
+        }
     }
 
     async fn wait_for_writer_schema(

@@ -145,5 +145,110 @@
     "level": "FULL",
     "reader": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"e\",\"type\":{\"type\":\"enum\",\"name\":\"E\",\"symbols\":[\"A\"]}}]}",
     "writer": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"e\",\"type\":{\"type\":\"enum\",\"name\":\"E\",\"symbols\":[\"A\",\"B\"]}}]}"
+  },
+  {
+    "case": "decimal_add_default",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"amount\",\"type\":{\"type\":\"bytes\",\"logicalType\":\"decimal\",\"precision\":9,\"scale\":2}},{\"name\":\"x\",\"type\":\"int\",\"default\":0}]}",
+    "writer": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"amount\",\"type\":{\"type\":\"bytes\",\"logicalType\":\"decimal\",\"precision\":9,\"scale\":2}}]}"
+  },
+  {
+    "case": "decimal_add_default",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"amount\",\"type\":{\"type\":\"bytes\",\"logicalType\":\"decimal\",\"precision\":9,\"scale\":2}},{\"name\":\"x\",\"type\":\"int\",\"default\":0}]}",
+    "writer": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"amount\",\"type\":{\"type\":\"bytes\",\"logicalType\":\"decimal\",\"precision\":9,\"scale\":2}}]}"
+  },
+  {
+    "case": "decimal_add_default",
+    "is_compatible": true,
+    "level": "FULL",
+    "reader": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"amount\",\"type\":{\"type\":\"bytes\",\"logicalType\":\"decimal\",\"precision\":9,\"scale\":2}},{\"name\":\"x\",\"type\":\"int\",\"default\":0}]}",
+    "writer": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"amount\",\"type\":{\"type\":\"bytes\",\"logicalType\":\"decimal\",\"precision\":9,\"scale\":2}}]}"
+  },
+  {
+    "case": "timestamp_millis_to_micros",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"long\",\"logicalType\":\"timestamp-micros\"}",
+    "writer": "{\"type\":\"long\",\"logicalType\":\"timestamp-millis\"}"
+  },
+  {
+    "case": "timestamp_millis_to_micros",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"long\",\"logicalType\":\"timestamp-micros\"}",
+    "writer": "{\"type\":\"long\",\"logicalType\":\"timestamp-millis\"}"
+  },
+  {
+    "case": "timestamp_millis_to_micros",
+    "is_compatible": true,
+    "level": "FULL",
+    "reader": "{\"type\":\"long\",\"logicalType\":\"timestamp-micros\"}",
+    "writer": "{\"type\":\"long\",\"logicalType\":\"timestamp-millis\"}"
+  },
+  {
+    "case": "date_to_time_millis",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"int\",\"logicalType\":\"time-millis\"}",
+    "writer": "{\"type\":\"int\",\"logicalType\":\"date\"}"
+  },
+  {
+    "case": "date_to_time_millis",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"int\",\"logicalType\":\"time-millis\"}",
+    "writer": "{\"type\":\"int\",\"logicalType\":\"date\"}"
+  },
+  {
+    "case": "date_to_time_millis",
+    "is_compatible": true,
+    "level": "FULL",
+    "reader": "{\"type\":\"int\",\"logicalType\":\"time-millis\"}",
+    "writer": "{\"type\":\"int\",\"logicalType\":\"date\"}"
+  },
+  {
+    "case": "enum_reader_default",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"enum\",\"name\":\"E\",\"symbols\":[\"A\"],\"default\":\"A\"}",
+    "writer": "{\"type\":\"enum\",\"name\":\"E\",\"symbols\":[\"A\",\"B\"]}"
+  },
+  {
+    "case": "enum_reader_default",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"enum\",\"name\":\"E\",\"symbols\":[\"A\"],\"default\":\"A\"}",
+    "writer": "{\"type\":\"enum\",\"name\":\"E\",\"symbols\":[\"A\",\"B\"]}"
+  },
+  {
+    "case": "enum_reader_default",
+    "is_compatible": true,
+    "level": "FULL",
+    "reader": "{\"type\":\"enum\",\"name\":\"E\",\"symbols\":[\"A\"],\"default\":\"A\"}",
+    "writer": "{\"type\":\"enum\",\"name\":\"E\",\"symbols\":[\"A\",\"B\"]}"
+  },
+  {
+    "case": "record_alias_rename",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"record\",\"name\":\"New\",\"aliases\":[\"Old\"],\"fields\":[]}",
+    "writer": "{\"type\":\"record\",\"name\":\"Old\",\"fields\":[]}"
+  },
+  {
+    "case": "record_alias_rename",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"record\",\"name\":\"New\",\"aliases\":[\"Old\"],\"fields\":[]}",
+    "writer": "{\"type\":\"record\",\"name\":\"Old\",\"fields\":[]}"
+  },
+  {
+    "case": "record_alias_rename",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"type\":\"record\",\"name\":\"New\",\"aliases\":[\"Old\"],\"fields\":[]}",
+    "writer": "{\"type\":\"record\",\"name\":\"Old\",\"fields\":[]}"
   }
 ]

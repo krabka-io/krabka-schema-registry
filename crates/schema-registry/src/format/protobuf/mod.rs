@@ -17,16 +17,11 @@
 mod compat;
 mod diff;
 
-use std::fmt::Write as _;
-
+pub use krabka_schema_serde::format::protobuf::normalize;
 use prost_reflect::{
     DescriptorPool,
     prost::Message,
-    prost_types::{
-        DescriptorProto, EnumDescriptorProto, FieldDescriptorProto, FileDescriptorProto,
-        FileDescriptorSet, ServiceDescriptorProto,
-        field_descriptor_proto::{Label, Type as FieldType},
-    },
+    prost_types::{FileDescriptorProto, FileDescriptorSet},
 };
 
 use super::ParsedSchema;
@@ -36,165 +31,6 @@ pub struct ProtobufSchema {
     descriptor: FileDescriptorProto,
     /// Normalised `.proto` text (cp-schema-registry compatible pretty-print).
     normalised: String,
-}
-
-/// Return the normalised `.proto` text for a `FileDescriptorProto`, matching
-/// the format cp-schema-registry uses when echoing schemas back.
-///
-/// Format (verified against cp-schema-registry 7.4.0):
-/// ```text
-/// syntax = "proto3";
-/// package m;
-///
-/// import "money.proto";
-///
-/// message Order {
-///   m.Money price = 1;
-/// }
-/// ```
-/// The `package` line, when present, follows the `syntax` line with no blank
-/// line between them. Each `import` and each top-level `message` is then a
-/// blank-line-separated block.
-#[must_use]
-pub fn normalize(fdp: &FileDescriptorProto) -> String {
-    let mut out = String::new();
-
-    // Emit syntax line; cp-schema-registry always emits `syntax = "proto3";\n`
-    // even if the proto2 syntax is used. This implementation accepts proto3.
-    let syntax = fdp.syntax.as_deref().unwrap_or("proto3");
-    let _ = writeln!(out, "syntax = \"{syntax}\";");
-
-    // Package declaration (if any) directly under the syntax line — cp emits it
-    // with no intervening blank line. Keeping it is required for cross-file
-    // type resolution (an imported `m.Money` only links if `package m;` survives).
-    if let Some(pkg) = fdp.package.as_deref().filter(|p| !p.is_empty()) {
-        let _ = writeln!(out, "package {pkg};");
-    }
-
-    // Imports, each a blank-line-separated block. The reference `name` IS the
-    // import path, so preserving these is what links resolved references.
-    for dep in &fdp.dependency {
-        out.push('\n');
-        let _ = writeln!(out, "import \"{dep}\";");
-    }
-
-    let package = fdp.package.as_deref().unwrap_or("");
-
-    for en in &fdp.enum_type {
-        out.push('\n');
-        write_enum(&mut out, en, 0);
-    }
-    for msg in &fdp.message_type {
-        out.push('\n');
-        write_message(&mut out, msg, 0, package);
-    }
-    for service in &fdp.service {
-        out.push('\n');
-        write_service(&mut out, service, package);
-    }
-    out
-}
-
-fn write_message(out: &mut String, msg: &DescriptorProto, depth: usize, package: &str) {
-    let indent = "  ".repeat(depth);
-    let name = msg.name.as_deref().unwrap_or("Unknown");
-    let _ = writeln!(out, "{indent}message {name} {{");
-    for en in &msg.enum_type {
-        write_enum(out, en, depth + 1);
-    }
-    for field in &msg.field {
-        write_field(out, field, depth + 1, package);
-    }
-    for nested in &msg.nested_type {
-        write_message(out, nested, depth + 1, package);
-    }
-    let _ = writeln!(out, "{indent}}}");
-}
-
-fn write_enum(out: &mut String, en: &EnumDescriptorProto, depth: usize) {
-    let indent = "  ".repeat(depth);
-    let name = en.name.as_deref().unwrap_or("Unknown");
-    let _ = writeln!(out, "{indent}enum {name} {{");
-    for value in &en.value {
-        let value_name = value.name.as_deref().unwrap_or("UNKNOWN");
-        let number = value.number.unwrap_or(0);
-        let _ = writeln!(out, "{indent}  {value_name} = {number};");
-    }
-    let _ = writeln!(out, "{indent}}}");
-}
-
-fn write_field(out: &mut String, field: &FieldDescriptorProto, depth: usize, package: &str) {
-    let indent = "  ".repeat(depth);
-    let ty = proto_type_name(field, package);
-    let name = field.name.as_deref().unwrap_or("unknown");
-    let number = field.number.unwrap_or(0);
-    // Repeated label prefix (proto3; optional is implicit).
-    let label_prefix = match field.label() {
-        Label::Repeated => "repeated ",
-        Label::Optional | Label::Required => "",
-    };
-    let _ = writeln!(out, "{indent}{label_prefix}{ty} {name} = {number};");
-}
-
-fn write_service(out: &mut String, service: &ServiceDescriptorProto, package: &str) {
-    let name = service.name.as_deref().unwrap_or("Unknown");
-    let _ = writeln!(out, "service {name} {{");
-    for method in &service.method {
-        let method_name = method.name.as_deref().unwrap_or("Unknown");
-        let input_prefix = if method.client_streaming.unwrap_or(false) {
-            "stream "
-        } else {
-            ""
-        };
-        let output_prefix = if method.server_streaming.unwrap_or(false) {
-            "stream "
-        } else {
-            ""
-        };
-        let input = proto_ref_name(method.input_type.as_deref().unwrap_or("Unknown"), package);
-        let output = proto_ref_name(method.output_type.as_deref().unwrap_or("Unknown"), package);
-        let _ = writeln!(
-            out,
-            "  rpc {method_name} ({input_prefix}{input}) returns ({output_prefix}{output});"
-        );
-    }
-    let _ = writeln!(out, "}}");
-}
-
-/// Map a `FieldDescriptorProto` to its `.proto` type name.
-fn proto_type_name(field: &FieldDescriptorProto, package: &str) -> String {
-    // If type_name is set (enum/message ref), use that (strip leading dot).
-    if let Some(ref tn) = field.type_name {
-        return proto_ref_name(tn, package);
-    }
-    match field.r#type() {
-        FieldType::Double => "double",
-        FieldType::Float => "float",
-        FieldType::Int64 => "int64",
-        FieldType::Uint64 => "uint64",
-        FieldType::Int32 => "int32",
-        FieldType::Fixed64 => "fixed64",
-        FieldType::Fixed32 => "fixed32",
-        FieldType::Bool => "bool",
-        FieldType::String => "string",
-        FieldType::Bytes => "bytes",
-        FieldType::Uint32 => "uint32",
-        FieldType::Sfixed32 => "sfixed32",
-        FieldType::Sfixed64 => "sfixed64",
-        FieldType::Sint32 => "sint32",
-        FieldType::Sint64 => "sint64",
-        FieldType::Group | FieldType::Message | FieldType::Enum => "unknown",
-    }
-    .to_string()
-}
-
-fn proto_ref_name(name: &str, package: &str) -> String {
-    if !package.is_empty()
-        && let Some(local) = name.strip_prefix(&format!(".{package}."))
-    {
-        return local.to_string();
-    }
-    name.trim_start_matches('.').to_string()
 }
 
 /// # Errors
@@ -252,7 +88,43 @@ pub fn check(
 ) -> Result<(), Vec<String>> {
     let reader_d = parse(reader, reader_refs).map_err(|e| vec![format!("reader: {e}")])?;
     let writer_d = parse(writer, writer_refs).map_err(|e| vec![format!("writer: {e}")])?;
-    let diffs = diff::compare(writer_d.descriptor(), reader_d.descriptor());
+    let mut diffs = diff::compare(writer_d.descriptor(), reader_d.descriptor());
+    for writer_ref in writer_refs
+        .iter()
+        .filter(|reference| reference.ty == super::SchemaType::Protobuf)
+    {
+        let Some(reader_ref) = reader_refs.iter().find(|reference| {
+            reference.ty == super::SchemaType::Protobuf && reference.name == writer_ref.name
+        }) else {
+            continue;
+        };
+        if writer_ref.schema == reader_ref.schema {
+            continue;
+        }
+        // Parse each reference against its own transitive dependencies, not
+        // the full reference closure. The closure includes the reference
+        // itself, so parsing it under its own name a second time would give
+        // the descriptor pool the same fully qualified messages twice and
+        // fail to link.
+        let writer_ref_deps: Vec<super::ResolvedReference> = writer_refs
+            .iter()
+            .filter(|r| r.name != writer_ref.name)
+            .cloned()
+            .collect();
+        let reader_ref_deps: Vec<super::ResolvedReference> = reader_refs
+            .iter()
+            .filter(|r| r.name != reader_ref.name)
+            .cloned()
+            .collect();
+        let writer_ref = parse(&writer_ref.schema, &writer_ref_deps)
+            .map_err(|error| vec![format!("writer reference: {error}")])?;
+        let reader_ref = parse(&reader_ref.schema, &reader_ref_deps)
+            .map_err(|error| vec![format!("reader reference: {error}")])?;
+        diffs.extend(diff::compare(
+            writer_ref.descriptor(),
+            reader_ref.descriptor(),
+        ));
+    }
     tracing::Span::current().record("diffs", diffs.len());
     let incompatible: Vec<&diff::Difference> = diffs
         .iter()
@@ -442,6 +314,59 @@ mod tests {
         }
     }
 
+    #[test]
+    fn milestone_23_field_rules() {
+        for (name, reader, writer, compatible) in [
+            (
+                "oneof-field-removed",
+                "syntax = \"proto3\"; message U { oneof x { int32 a = 1; } }",
+                "syntax = \"proto3\"; message U { oneof x { int32 a = 1; int32 b = 2; } }",
+                false,
+            ),
+            (
+                "existing-plus-new-moved-to-oneof",
+                "syntax = \"proto3\"; message U { oneof x { int32 a = 1; int32 b = 2; } }",
+                "syntax = \"proto3\"; message U { int32 a = 1; }",
+                true,
+            ),
+            (
+                "proto2-required-added",
+                "syntax = \"proto2\"; message U { required int32 a = 1; }",
+                "syntax = \"proto2\"; message U {}",
+                false,
+            ),
+            (
+                "proto2-required-removed",
+                "syntax = \"proto2\"; message U {}",
+                "syntax = \"proto2\"; message U { required int32 a = 1; }",
+                false,
+            ),
+            (
+                "proto2-numeric-label",
+                "syntax = \"proto2\"; message U { repeated int32 a = 1; }",
+                "syntax = \"proto2\"; message U { optional int32 a = 1; }",
+                false,
+            ),
+            (
+                "proto3-explicit-numeric-label",
+                "syntax = \"proto3\"; message U { repeated int32 a = 1; }",
+                "syntax = \"proto3\"; message U { optional int32 a = 1; }",
+                false,
+            ),
+            (
+                "string-label",
+                "syntax = \"proto2\"; message U { repeated string a = 1; }",
+                "syntax = \"proto2\"; message U { optional string a = 1; }",
+                true,
+            ),
+        ] {
+            assert2::assert!(
+                check(reader, writer, &[], &[]).is_ok() == compatible,
+                "{name}"
+            );
+        }
+    }
+
     // ── reference resolution ─────────────────────────────────────────────────
 
     #[test]
@@ -465,6 +390,56 @@ mod tests {
         ] {
             assert2::assert!(parse(candidate, &refs).is_ok() == expected);
         }
+    }
+
+    #[test]
+    fn protobuf_diffs_changed_imports() {
+        use crate::format::{ResolvedReference, SchemaType};
+        let candidate =
+            "syntax = \"proto3\"; import \"money.proto\"; message Order { m.Money price = 1; }";
+        let reference = |schema: &str| ResolvedReference {
+            name: "money.proto".into(),
+            ty: SchemaType::Protobuf,
+            schema: schema.into(),
+        };
+        let old = reference("syntax = \"proto3\"; package m; message Money { int64 cents = 1; }");
+        let changed =
+            reference("syntax = \"proto3\"; package m; message Money { string cents = 1; }");
+
+        assert2::assert!(
+            check(
+                candidate,
+                candidate,
+                std::slice::from_ref(&old),
+                std::slice::from_ref(&old)
+            )
+            .is_ok()
+        );
+        assert2::assert!(check(candidate, candidate, &[changed], &[old]).is_err());
+    }
+
+    /// Regression: a reference is parsed against its own transitive
+    /// dependencies, not the full closure that includes the reference
+    /// itself. Before the fix, `check` always rejected a changed reference,
+    /// even one whose change was backward compatible, because linking the
+    /// reference against a closure that repeats its own fully qualified
+    /// messages failed.
+    #[test]
+    fn protobuf_reference_check_accepts_a_compatible_reference_change() {
+        use crate::format::{ResolvedReference, SchemaType};
+        let candidate =
+            "syntax = \"proto3\"; import \"money.proto\"; message Order { m.Money price = 1; }";
+        let reference = |schema: &str| ResolvedReference {
+            name: "money.proto".into(),
+            ty: SchemaType::Protobuf,
+            schema: schema.into(),
+        };
+        let old = reference("syntax = \"proto3\"; package m; message Money { int64 cents = 1; }");
+        let compatible = reference(
+            "syntax = \"proto3\"; package m; message Money { int64 cents = 1; string currency = 2; }",
+        );
+
+        assert2::assert!(check(candidate, candidate, &[compatible], &[old]).is_ok());
     }
 
     #[test]
@@ -500,7 +475,10 @@ mod tests {
 
     #[test]
     fn normalize_preserves_nested_enum_and_message_indentation() {
-        use prost_reflect::prost_types::EnumValueDescriptorProto;
+        use prost_reflect::prost_types::{
+            DescriptorProto, EnumDescriptorProto, EnumValueDescriptorProto, FieldDescriptorProto,
+            field_descriptor_proto::{Label, Type as FieldType},
+        };
 
         let fdp = FileDescriptorProto {
             syntax: Some("proto3".into()),
@@ -542,15 +520,5 @@ mod tests {
             normalize(&fdp)
                 == "syntax = \"proto3\";\n\nmessage Outer {\n  enum Kind {\n    KIND_UNSPECIFIED = 0;\n    KIND_READY = 1;\n  }\n  message Inner {\n    string id = 1;\n  }\n}\n"
         );
-    }
-
-    #[test]
-    fn proto_ref_name_does_not_treat_empty_package_as_local_prefix() {
-        for (_name, reference, package, expected) in [
-            ("empty_package", "...Money", "", "Money"),
-            ("local_package", ".m.Money", "m", "Money"),
-        ] {
-            assert2::assert!(proto_ref_name(reference, package) == expected);
-        }
     }
 }

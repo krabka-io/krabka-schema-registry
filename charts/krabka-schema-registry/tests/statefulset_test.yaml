@@ -1,0 +1,161 @@
+suite: statefulset
+templates:
+  - statefulset.yaml
+release:
+  name: sr
+  namespace: kafka
+set:
+  bootstrapServers: broker:9092
+tests:
+  - it: renders a StatefulSet governed by the headless Service
+    asserts:
+      - isKind:
+          of: StatefulSet
+      - equal:
+          path: spec.serviceName
+          value: sr-krabka-schema-registry-headless
+      - equal:
+          path: spec.podManagementPolicy
+          value: Parallel
+
+  - it: advertises the per-pod DNS name of the headless Service
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCHEMA_REGISTRY_ADVERTISED_URL
+            value: http://$(POD_NAME).sr-krabka-schema-registry-headless.kafka.svc.cluster.local:8081
+
+  - it: keeps the advertised name and the Service name inside one DNS label
+    set:
+      fullnameOverride: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    asserts:
+      - equal:
+          path: spec.serviceName
+          value: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-headless
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCHEMA_REGISTRY_ADVERTISED_URL
+            value: http://$(POD_NAME).aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-headless.kafka.svc.cluster.local:8081
+
+  - it: gives the schema replay a startup probe before the liveness probe runs
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe
+          value:
+            tcpSocket:
+              port: rest
+            periodSeconds: 5
+            failureThreshold: 60
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe
+          value:
+            tcpSocket:
+              port: rest
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe
+          value:
+            tcpSocket:
+              port: rest
+            initialDelaySeconds: 2
+            periodSeconds: 5
+
+  - it: takes probe timing from healthChecks
+    set:
+      healthChecks.startupPeriodSeconds: 10
+      healthChecks.startupFailureThreshold: 90
+      healthChecks.livenessInitialDelaySeconds: 7
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe.periodSeconds
+          value: 10
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe.failureThreshold
+          value: 90
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.initialDelaySeconds
+          value: 7
+
+  - it: connects in plaintext by default and mounts no credentials
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --kafka-security-protocol=PLAINTEXT
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --kafka-sasl-mechanism=PLAIN
+      - isNull:
+          path: spec.template.spec.volumes
+      - isNull:
+          path: spec.template.spec.containers[0].volumeMounts
+
+  - it: reads the broker SASL credential from an existing Secret
+    set:
+      kafkaClient.securityProtocol: SASL_SSL
+      kafkaClient.sasl.mechanism: SCRAM-SHA-512
+      kafkaClient.sasl.secretRef: sr-kafka-creds
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --kafka-security-protocol=SASL_SSL
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --kafka-sasl-mechanism=SCRAM-SHA-512
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCHEMA_REGISTRY_KAFKA_SASL_USERNAME
+            valueFrom:
+              secretKeyRef:
+                name: sr-kafka-creds
+                key: username
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCHEMA_REGISTRY_KAFKA_SASL_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: sr-kafka-creds
+                key: password
+
+  - it: mounts the broker CA and sets the TLS server name
+    set:
+      kafkaClient.securityProtocol: SSL
+      kafkaClient.tls.caSecretName: broker-ca
+      kafkaClient.tls.serverNameOverride: broker.internal
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --kafka-tls-ca=/etc/sr/kafka-tls/ca.crt
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --kafka-tls-server-name=broker.internal
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: kafka-tls
+            mountPath: /etc/sr/kafka-tls
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: kafka-tls
+            secret:
+              secretName: broker-ca
+
+  - it: refuses a SASL protocol without a credential Secret
+    set:
+      kafkaClient.securityProtocol: SASL_PLAINTEXT
+    asserts:
+      - failedTemplate:
+          errorMessage: kafkaClient.sasl.secretRef is required when kafkaClient.securityProtocol selects SASL
+
+  - it: refuses an empty bootstrapServers
+    set:
+      bootstrapServers: ""
+    asserts:
+      - failedTemplate:
+          errorMessage: bootstrapServers is required

@@ -20,16 +20,16 @@ suites run against.
 
 | Crate | What it is |
 | --- | --- |
-| `crabka-schema-registry` | The service: the Confluent REST API, the `_schemas` store, primary election, compatibility checking, auth and ACLs. Ships three binaries. |
-| `crabka-schema-serde` | The client side: the `0x00 \| id \| body` framing, the REST client, and the Avro, Protobuf and JSON-Schema serdes. |
+| `krabka-schema-registry` | The service: the Confluent REST API, the `_schemas` store, primary election, compatibility checking, auth and ACLs. Ships three binaries. |
+| `krabka-schema-serde` | The client side: the `0x00 \| id \| body` framing, the REST client, and the Avro, Protobuf and JSON-Schema serdes. |
 
 ### Binaries
 
 | Binary | What it does |
 | --- | --- |
-| `crabka-schema-registry` | The registry server. |
-| `crabka-schema-push` | Registers a schema file under a subject. |
-| `crabka-schema-compat-check` | Checks a schema against a subject's history without registering it. |
+| `krabka-schema-registry` | The registry server. |
+| `krabka-schema-push` | Registers a schema file under a subject. |
+| `krabka-schema-compat-check` | Checks a schema against a subject's history without registering it. |
 
 ## What it covers
 
@@ -79,7 +79,7 @@ concurrently.
 ## Sibling revisions
 
 Member manifests declare the sibling crates as ordinary
-`crabka-x = "0.4.0"` requirements. The `[patch.crates-io]` block at the bottom
+`krabka-x = "0.4.0"` requirements. The `[patch.crates-io]` block at the bottom
 of the root `Cargo.toml` is the single place a sibling revision moves. To take a
 newer sibling, change the revision there, re-run `cargo generate-lockfile`, and
 commit both files.
@@ -90,16 +90,67 @@ list, and every sibling's `members` is the glob `crates/*`, which it skips.
 
 ## Documentation
 
+- [Roadmap](docs/roadmap.md)
 - [Deployment](docs/deploy.md)
 - [Design documents](docs/design/)
 - [Style guides](docs/style_guides/README.md)
 
-## Not yet here
+## Deployment
 
-The Helm chart, the apko image definition and the operator's `SchemaRegistry`
-CRD still live in [`robot-head/crabka`](https://github.com/robot-head/crabka).
-The CRD belongs to that repository's operator crate, which is not moving, so the
-packaging follows it rather than being split in half.
+The standalone Helm chart is in
+[`charts/krabka-schema-registry`](charts/krabka-schema-registry):
+
+```sh
+helm install sr charts/krabka-schema-registry --set bootstrapServers=my-broker:9092
+```
+
+See [Deployment](docs/deploy.md) for the operator-managed alternative and for
+the security fields.
+
+The chart default image is `ghcr.io/krabka-io/krabka-schema-registry`, with the
+chart `appVersion` as its tag.
+
+## The container image
+
+[`packaging/BUILD.bazel`](packaging/BUILD.bazel) builds the image with Bazel,
+the same way [`krabka-io/krabka-broker`](https://github.com/krabka-io/krabka-broker)
+does. There is no Dockerfile. apko builds a bare Wolfi base from
+[`packaging/base.apko.yaml`](packaging/base.apko.yaml) and its lockfile.
+`rules_img` adds the Bazel-built `krabka-schema-registry` binary as a layer at
+`/usr/bin/krabka-schema-registry`. The image runs that binary as uid 65532. It
+is built for `amd64` only.
+
+```sh
+bazel run -c opt //packaging:image_load     # load ghcr.io/krabka-io/krabka-schema-registry:dev
+docker run --rm ghcr.io/krabka-io/krabka-schema-registry:dev --help
+bazel test -c opt //packaging:image_docker_test
+```
+
+The `image` CI job builds and runs the image on every pull request. It also
+checks that the chart default image uses the workspace version from
+`Cargo.toml` as its tag. On each push to the default branch, the `delivery` job
+pushes the image with two tags:
+
+- the commit SHA, which never moves
+- the workspace version, for example `0.4.0`, which is the tag that the chart
+  installs by default
+
+The Helm index at https://krabka.io/charts sets the chart `appVersion` to the
+same workspace version, so a chart from the index pulls a tag that `delivery`
+published.
+
+To change the base packages, edit `packaging/base.apko.yaml` and write the lock
+again:
+
+```sh
+bazel run @rules_apko//apko -- lock packaging/base.apko.yaml
+```
+
+## Packaging elsewhere
+
+The `SchemaRegistry` CRD is in
+[`krabka-io/krabka-operator`](https://github.com/krabka-io/krabka-operator),
+under the `krabka.io` API group. The CRD belongs to the operator crate.
 
 ## License
 

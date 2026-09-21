@@ -1,6 +1,6 @@
 +++
 title = "Schema Registry Deployment"
-description = "Deploy Crabka's Confluent-compatible Schema Registry: a REST service that stores schemas in the compacted _schemas topic and enforces compatibility checks."
+description = "Deploy Krabka's Confluent-compatible Schema Registry: a REST service that stores schemas in the compacted _schemas topic and enforces compatibility checks."
 weight = 20
 template = "docs/page.html"
 
@@ -8,7 +8,7 @@ template = "docs/page.html"
 mermaid = true
 +++
 
-Crabka includes a Confluent Schema Registry-compatible REST service. It runs as
+Krabka includes a Confluent Schema Registry-compatible REST service. It runs as
 a separate Kafka client and stores state in the compacted `_schemas` topic. You
 can deploy it with the operator or as a standalone Helm release.
 
@@ -46,17 +46,17 @@ The next sections show how to deploy the registry.
 
 ## Operator-managed (recommended)
 
-Apply a `SchemaRegistry` next to a managed `Kafka`. The `crabka.io/cluster`
+Apply a `SchemaRegistry` next to a managed `Kafka`. The `krabka.io/cluster`
 label binds it to the cluster. The registry gets its bootstrap address from the
 internal listener.
 
 ```yaml
-apiVersion: crabka.io/v1alpha1
+apiVersion: krabka.io/v1alpha1
 kind: SchemaRegistry
 metadata:
   name: sr
   labels:
-    crabka.io/cluster: demo
+    krabka.io/cluster: demo
 spec:
   replicas: 3
   schemasTopicReplicationFactor: 3
@@ -70,9 +70,43 @@ lists every field.
 ## Standalone (Helm, external broker)
 
 ```bash
-helm install sr charts/crabka-schema-registry \
+helm install sr charts/krabka-schema-registry \
   --set bootstrapServers=my-broker:9092
 ```
+
+The chart renders a StatefulSet, a ClusterIP Service, and a headless Service.
+The StatefulSet gives each pod a stable hostname and subdomain, so the pod DNS
+name `<pod>.<release>-krabka-schema-registry-headless.<ns>.svc.cluster.local`
+that each pod advertises resolves. A secondary forwards every write to that
+name, so a Deployment cannot replace the StatefulSet here: the Deployment
+controller sets no pod hostname, and the record does not exist.
+
+The registry binds the REST port only after it replays the whole `_schemas`
+topic. A startup probe covers that replay and holds back the liveness probe.
+The default limit is 5 minutes. Raise `healthChecks.startupFailureThreshold`
+for a large registry or a slow broker.
+
+To reach a broker that requires SASL, TLS, or both, put the client credentials
+in a Secret and name it:
+
+```bash
+kubectl create secret generic sr-kafka-creds \
+  --from-literal=username=schema-registry \
+  --from-literal=password=…
+
+helm install sr charts/krabka-schema-registry \
+  --set bootstrapServers=my-broker:9093 \
+  --set kafkaClient.securityProtocol=SASL_SSL \
+  --set kafkaClient.sasl.mechanism=SCRAM-SHA-512 \
+  --set kafkaClient.sasl.secretRef=sr-kafka-creds \
+  --set kafkaClient.tls.caSecretName=broker-ca
+```
+
+The `kafkaClient` values match the `kafkaClient` block of the SchemaRegistry
+CRD. `sasl.secretRef` names a Secret with a `username` key and a `password`
+key. `tls.caSecretName` names a Secret with a `ca.crt` key. The chart mounts
+that key at `/etc/sr/kafka-tls/ca.crt`. The chart never takes a password as a
+value.
 
 ## Security
 
@@ -80,6 +114,24 @@ Three fields map to mounted Secrets and SR flags: `spec.tls`,
 `spec.authentication` for Basic or unsecured Bearer, and `spec.authorization`
 for Kafka-ACL super-users. Credentials are always referenced Secrets. Never
 write them inline.
+
+Authenticated or authorized standalone nodes must share
+`SCHEMA_REGISTRY_FORWARD_SECRET`. The secondary sends it only on the internal
+forward hop; clients cannot bypass authentication by forging the forwarding
+header. Mount the value from a Secret and restrict registry-to-registry traffic
+with network policy or mTLS.
+
+Basic authentication accepts Confluent password-property entries such as
+`alice: pw,admin`. Set permitted roles with `SCHEMA_REGISTRY_AUTH_ROLES`, and
+provide inline users and authorization super-users with
+`SCHEMA_REGISTRY_BASIC_USERS` and `SCHEMA_REGISTRY_SUPER_USERS`; separate
+multiple entries with newlines so commas remain valid in roles and certificate
+subjects. `SCHEMA_REGISTRY_AUTH_ROLES=*` accepts any declared role. For broker
+SASL, mount the password and set `SCHEMA_REGISTRY_KAFKA_SASL_PASSWORD_FILE`.
+
+The profiling admin listener binds to `127.0.0.1:9404` by default. Set
+`--admin-listen-addr=off` (or `KRABKA_ADMIN_LISTEN_ADDR=off`) to disable it. Bind
+it to a non-loopback address only behind an authenticated administrative proxy.
 
 ## Next steps
 

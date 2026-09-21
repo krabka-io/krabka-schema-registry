@@ -1,6 +1,6 @@
 //! In-process integration of the registry security stack against a real broker.
 //!
-//! Boots a Crabka `Broker` and seeds Kafka ACLs that Allow `User:alice` Write
+//! Boots a Krabka `Broker` and seeds Kafka ACLs that Allow `User:alice` Write
 //! and Read on `Topic:s`. It then starts secure registry nodes wired with the
 //! full middleware stack: `auth_layer` with require Basic, then `authz_layer`
 //! enabled and refreshed from the broker's `DescribeAcls`, then
@@ -26,11 +26,11 @@ use std::{
 
 use axum::Router;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD as B64};
-use crabka_broker::{Broker, BrokerConfig};
-use crabka_client_admin::{
+use krabka_broker::{Broker, BrokerConfig};
+use krabka_client_admin::{
     AclEntry, AclOperation, AdminClient, PatternType, PermissionType, ResourceType,
 };
-use crabka_schema_registry::{
+use krabka_schema_registry::{
     auth::{AuthState, basic::BasicAuthStore},
     authz::SchemaRegistryAuthz,
     cli::{SecurityCliInput, build_security},
@@ -39,11 +39,11 @@ use crabka_schema_registry::{
     kafkastore::KafkaStore,
     rest::{self, AppState, SecurityLayers, forward::ForwardState},
 };
-use crabka_security::{
+use krabka_security::{
     ClientAuthMode, Jwks, TlsConfig,
     ca::{SubjectAltName, generate_clients_ca, issue_broker_cert, issue_user_cert},
 };
-use crabka_units::prelude::*;
+use krabka_units::prelude::*;
 use tokio_util::sync::CancellationToken;
 
 const SR_CONTENT_TYPE: &str = "application/vnd.schemaregistry.v1+json";
@@ -73,13 +73,14 @@ fn secure_cfg_with_scheme(
         advertised_url: format!("{scheme}://127.0.0.1:{port}"),
         group_id: "schema-registry".into(),
         leader_eligibility: true,
-        runtime: crabka_schema_registry::config::RegistryRuntimeConfig::default(),
+        runtime: krabka_schema_registry::config::RegistryRuntimeConfig::default(),
         security: SecurityConfig {
             require_auth: true,
             realm: "test".into(),
             basic: Some(BasicAuthConfig {
                 users: alice_users(),
                 file: None,
+                required_roles: HashSet::new(),
             }),
             bearer: None,
             tls,
@@ -88,6 +89,7 @@ fn secure_cfg_with_scheme(
                 super_users: HashSet::new(),
                 acl_refresh: millis(300),
             }),
+            forward_secret: Some("test-forward-secret".into()),
             client: None,
         },
     }
@@ -159,10 +161,12 @@ async fn start_secure_node(bootstrap: &str) -> Node {
     store.install_primary(primary.clone());
 
     let auth = AuthState {
+        audit: krabka_audit::AuditLog::disabled(),
         basic: Some(Arc::new(BasicAuthStore::from_users(alice_users()))),
         bearer: None,
         require_auth: true,
         realm: "test".into(),
+        forward_secret: Some("test-forward-secret".into()),
     };
     let authz = Arc::new(SchemaRegistryAuthz::new(HashSet::new(), true));
     {
@@ -183,6 +187,7 @@ async fn start_secure_node(bootstrap: &str) -> Node {
         http: reqwest::Client::new(),
         node_id: cfg.advertised_url.clone(),
         forward_max_body: cfg.runtime.forward_max_body,
+        forward_secret: cfg.security.forward_secret.clone(),
     };
     let app: Router = rest::router_with_security(
         AppState {
@@ -226,12 +231,8 @@ async fn await_state(
     }
 }
 
-/// POST a `register` for `subject` to `port` as `alice:pw`; returns the status.
-async fn register_as_alice(
-    http: &reqwest::Client,
-    port: i32,
-    subject: &str,
-) -> reqwest::StatusCode {
+/// POST a `register` for `subject` to `port` as `alice:pw`.
+async fn register_as_alice(http: &reqwest::Client, port: i32, subject: &str) -> reqwest::Response {
     http.post(format!(
         "http://127.0.0.1:{port}/subjects/{subject}/versions"
     ))
@@ -241,7 +242,6 @@ async fn register_as_alice(
     .send()
     .await
     .unwrap()
-    .status()
 }
 
 /// Poll `register` on `subject` as `alice:pw` until it returns `200`, or until
@@ -251,8 +251,8 @@ async fn register_as_alice(
 async fn await_register_200(http: &reqwest::Client, port: i32, subject: &str, secs: u64) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
     loop {
-        let st = register_as_alice(http, port, subject).await;
-        if st == 200 {
+        let response = register_as_alice(http, port, subject).await;
+        if response.status() == 200 {
             return;
         }
         assert2::assert!(tokio::time::Instant::now() < deadline);
@@ -293,11 +293,7 @@ fn https_client(ca_pem: &str, identity: Option<(&str, &str)>) -> reqwest::Client
     builder.build().unwrap()
 }
 
-async fn register_over_mtls(
-    http: &reqwest::Client,
-    port: i32,
-    subject: &str,
-) -> reqwest::StatusCode {
+async fn register_over_mtls(http: &reqwest::Client, port: i32, subject: &str) -> reqwest::Response {
     http.post(format!(
         "https://127.0.0.1:{port}/subjects/{subject}/versions"
     ))
@@ -306,14 +302,13 @@ async fn register_over_mtls(
     .send()
     .await
     .unwrap()
-    .status()
 }
 
 async fn await_register_mtls_200(http: &reqwest::Client, port: i32, subject: &str, secs: u64) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
     loop {
-        let status = register_over_mtls(http, port, subject).await;
-        if status == 200 {
+        let response = register_over_mtls(http, port, subject).await;
+        if response.status() == 200 {
             return;
         }
         assert2::assert!(tokio::time::Instant::now() < deadline);
@@ -355,10 +350,12 @@ async fn start_mtls_node(bootstrap: &str, tls: TlsConfig, forward_http: reqwest:
     store.install_primary(primary.clone());
 
     let auth = AuthState {
+        audit: krabka_audit::AuditLog::disabled(),
         basic: None,
         bearer: None,
         require_auth: true,
         realm: "test".into(),
+        forward_secret: cfg.security.forward_secret.clone(),
     };
     let authz = Arc::new(SchemaRegistryAuthz::new(HashSet::new(), true));
     {
@@ -379,6 +376,7 @@ async fn start_mtls_node(bootstrap: &str, tls: TlsConfig, forward_http: reqwest:
         http: forward_http,
         node_id: cfg.advertised_url.clone(),
         forward_max_body: cfg.runtime.forward_max_body,
+        forward_secret: cfg.security.forward_secret.clone(),
     };
     let app: Router = rest::router_with_security(
         AppState {
@@ -438,6 +436,16 @@ async fn single_node_enforces_authn_and_authz() {
     assert2::assert!(status.as_u16() == 401);
     assert2::assert!(www == r#"basic realm="test""#);
 
+    let forged = http
+        .post(&register_url)
+        .header(rest::forward::FORWARD_HEADER, "attacker")
+        .header("content-type", SR_CONTENT_TYPE)
+        .body(SCHEMA_BODY)
+        .send()
+        .await
+        .unwrap();
+    assert2::assert!(forged.status() == 401);
+
     // ── 401: wrong password, and an unknown user. ────────────────────────────
     for (_name, user, password) in [
         ("wrong_password", "alice", "wrong"),
@@ -458,11 +466,79 @@ async fn single_node_enforces_authn_and_authz() {
     await_register_200(&http, port, "s", 15).await;
 
     // ── 403: alice authenticates but has no ACL for `other`. ─────────────────
-    let st = register_as_alice(&http, port, "other").await;
-    assert2::assert!(st == 403);
+    let denied = register_as_alice(&http, port, "other").await;
+    assert2::assert!(denied.status() == 403);
+    assert2::assert!(denied.json::<serde_json::Value>().await.unwrap()["error_code"] == 40301);
+
+    // These registered routes must not bypass authz merely because their
+    // handlers would otherwise return an empty/not-found response.
+    for (method, path) in [
+        (reqwest::Method::DELETE, "/config/other"),
+        (reqwest::Method::GET, "/schemas/ids/1/schema"),
+        (reqwest::Method::GET, "/schemas/ids/1/subjects"),
+    ] {
+        let response = http
+            .request(method, format!("http://127.0.0.1:{port}{path}"))
+            .basic_auth("alice", Some("pw"))
+            .send()
+            .await
+            .unwrap();
+        assert2::assert!(response.status() == 403);
+        assert2::assert!(
+            response.json::<serde_json::Value>().await.unwrap()["error_code"] == 40301
+        );
+    }
 
     // ── 200 read: alice has Read on `s`. ─────────────────────────────────────
     await_get_body_as_alice(&http, &register_url, "[1]", 15).await;
+
+    node.cancel.cancel();
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plaintext_listener_enforces_host_scoped_deny() {
+    let dir = tempfile::tempdir().unwrap();
+    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+        .await
+        .unwrap();
+    let bootstrap = broker.listen_addr().to_string();
+    seed_acls(&bootstrap).await;
+
+    let mut node = start_secure_node(&bootstrap).await;
+    await_state(&mut node.primary, 25, |state| state.is_primary).await;
+    let http = reqwest::Client::new();
+    await_register_200(&http, node.port, "s", 15).await;
+
+    let mut admin = AdminClient::connect(std::slice::from_ref(&bootstrap))
+        .await
+        .unwrap();
+    let outcomes = admin
+        .create_acls(&[AclEntry {
+            resource_type: ResourceType::Topic,
+            resource_name: "s".into(),
+            pattern_type: PatternType::Literal,
+            principal: "User:alice".into(),
+            host: "127.0.0.1".into(),
+            operation: AclOperation::Write,
+            permission_type: PermissionType::Deny,
+        }])
+        .await
+        .unwrap();
+    assert2::assert!(outcomes.into_iter().all(|outcome| outcome.error.is_none()));
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let denied = register_as_alice(&http, node.port, "s").await;
+        if denied.status() == 403 {
+            assert2::assert!(
+                denied.json::<serde_json::Value>().await.unwrap()["error_code"] == 40301
+            );
+            break;
+        }
+        assert2::assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
 
     node.cancel.cancel();
     broker.shutdown().await;
@@ -496,7 +572,7 @@ async fn https_round_trip_enforces_auth_over_tls() {
         private_key_path: key_path,
         trust_roots_path: None,
         client_ca_path: None,
-        client_auth: crabka_security::ClientAuthMode::Disabled,
+        client_auth: krabka_security::ClientAuthMode::Disabled,
     };
 
     // Boot a node serving HTTPS. Listener bound first for the real port.
@@ -510,10 +586,12 @@ async fn https_round_trip_enforces_auth_over_tls() {
     let mut primary = Election::start(&cfg, cancel.clone()).await.unwrap();
     store.install_primary(primary.clone());
     let auth = AuthState {
+        audit: krabka_audit::AuditLog::disabled(),
         basic: Some(Arc::new(BasicAuthStore::from_users(alice_users()))),
         bearer: None,
         require_auth: true,
         realm: "test".into(),
+        forward_secret: cfg.security.forward_secret.clone(),
     };
     // authz disabled (None) here: this test exercises auth-over-TLS, not ACLs.
     let fwd = ForwardState {
@@ -521,6 +599,7 @@ async fn https_round_trip_enforces_auth_over_tls() {
         http: reqwest::Client::new(),
         node_id: cfg.advertised_url.clone(),
         forward_max_body: cfg.runtime.forward_max_body,
+        forward_secret: cfg.security.forward_secret.clone(),
     };
     let app: Router = rest::router_with_security(
         AppState {
@@ -623,8 +702,9 @@ async fn mtls_two_nodes_authorize_then_forward_to_primary() {
     await_get_body_over_mtls(&mtls_alice, primary_port, "s", "[1]", 20).await;
     await_get_body_over_mtls(&mtls_alice, secondary_port, "s", "[1]", 20).await;
 
-    let status = register_over_mtls(&mtls_alice, secondary_port, "other").await;
-    assert2::assert!(status == 403);
+    let denied = register_over_mtls(&mtls_alice, secondary_port, "other").await;
+    assert2::assert!(denied.status() == 403);
+    assert2::assert!(denied.json::<serde_json::Value>().await.unwrap()["error_code"] == 40301);
 
     a.cancel.cancel();
     b.cancel.cancel();
@@ -668,8 +748,9 @@ async fn two_nodes_authorize_then_forward_to_primary() {
 
     // A write to the SECONDARY for `other` (no ACL): denied at ingress with 403,
     // never forwarded.
-    let st = register_as_alice(&http, secondary_port, "other").await;
-    assert2::assert!(st == 403);
+    let denied = register_as_alice(&http, secondary_port, "other").await;
+    assert2::assert!(denied.status() == 403);
+    assert2::assert!(denied.json::<serde_json::Value>().await.unwrap()["error_code"] == 40301);
 
     a.cancel.cancel();
     b.cancel.cancel();
@@ -785,6 +866,7 @@ async fn start_jwks_node(
     let input = SecurityCliInput {
         require_auth: true,
         realm: "test".into(),
+        forward_secret: Some("test-forward-secret".into()),
         bearer: "jwks".into(),
         jwks_endpoint_uri: Some("https://test.invalid/.well-known/jwks.json".into()),
         jwks_valid_issuer: valid_issuer,
@@ -807,7 +889,7 @@ async fn start_jwks_node(
         advertised_url: format!("http://127.0.0.1:{port}"),
         group_id: "schema-registry".into(),
         leader_eligibility: true,
-        runtime: crabka_schema_registry::config::RegistryRuntimeConfig::default(),
+        runtime: krabka_schema_registry::config::RegistryRuntimeConfig::default(),
         security: out.config,
     };
     let cancel = CancellationToken::new();
@@ -817,16 +899,19 @@ async fn start_jwks_node(
 
     let bearer_validator = cfg.security.bearer.as_ref().map(|b| b.validator.clone());
     let auth = AuthState {
+        audit: krabka_audit::AuditLog::disabled(),
         basic: None,
         bearer: bearer_validator,
         require_auth: true,
         realm: "test".into(),
+        forward_secret: cfg.security.forward_secret.clone(),
     };
     let fwd = ForwardState {
         primary: primary.clone(),
         http: reqwest::Client::new(),
         node_id: cfg.advertised_url.clone(),
         forward_max_body: cfg.runtime.forward_max_body,
+        forward_secret: cfg.security.forward_secret.clone(),
     };
     let app: Router = rest::router_with_security(
         AppState {

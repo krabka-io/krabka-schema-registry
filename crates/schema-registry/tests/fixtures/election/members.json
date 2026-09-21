@@ -3,16 +3,16 @@
     "client_host": "",
     "client_id": "",
     "is_master": false,
-    "member_assignment": "{\"error\":0,\"master\":\"crabka-94d06161-7d0b-4101-acb6-aa18c71a9335\",\"master_identity\":{\"host\":\"sr-node-1\",\"port\":8081,\"master_eligibility\":true,\"scheme\":\"http\",\"version\":1},\"version\":1}",
-    "member_id": "crabka-051c5719-fb49-40f7-bd96-cbe3e5e2777c",
+    "member_assignment": "{\"error\":0,\"master\":\"krabka-94d06161-7d0b-4101-acb6-aa18c71a9335\",\"master_identity\":{\"host\":\"sr-node-1\",\"port\":8081,\"master_eligibility\":true,\"scheme\":\"http\",\"version\":1},\"version\":1}",
+    "member_id": "krabka-051c5719-fb49-40f7-bd96-cbe3e5e2777c",
     "member_metadata": "{\"host\":\"sr-node-2\",\"port\":8081,\"master_eligibility\":true,\"scheme\":\"http\",\"version\":1}"
   },
   {
     "client_host": "",
     "client_id": "",
     "is_master": true,
-    "member_assignment": "{\"error\":0,\"master\":\"crabka-94d06161-7d0b-4101-acb6-aa18c71a9335\",\"master_identity\":{\"host\":\"sr-node-1\",\"port\":8081,\"master_eligibility\":true,\"scheme\":\"http\",\"version\":1},\"version\":1}",
-    "member_id": "crabka-94d06161-7d0b-4101-acb6-aa18c71a9335",
+    "member_assignment": "{\"error\":0,\"master\":\"krabka-94d06161-7d0b-4101-acb6-aa18c71a9335\",\"master_identity\":{\"host\":\"sr-node-1\",\"port\":8081,\"master_eligibility\":true,\"scheme\":\"http\",\"version\":1},\"version\":1}",
+    "member_id": "krabka-94d06161-7d0b-4101-acb6-aa18c71a9335",
     "member_metadata": "{\"host\":\"sr-node-1\",\"port\":8081,\"master_eligibility\":true,\"scheme\":\"http\",\"version\":1}"
   }
 ]

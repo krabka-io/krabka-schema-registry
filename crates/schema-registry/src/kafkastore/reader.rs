@@ -4,19 +4,30 @@
 //! remote-storage-topic's `partition_fetch_loop`.
 
 use std::{
+    collections::HashSet,
     net::{SocketAddr, ToSocketAddrs},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
-use crabka_client_core::{
+use krabka_client_core::{
     ClientError, ClientSecurity, Connection, ConnectionOptions, DEFAULT_FETCH_RESPONSE_MAX,
     FetchMinBytes, IsolatedFetch, fetch_partition_with_isolation_progress,
 };
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-use crabka_units::prelude::*;
+use krabka_protocol::{
+    owned::{
+        list_offsets_request::{ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic},
+        metadata_request::{MetadataRequest, MetadataRequestTopic},
+    },
+    primitives::uuid::Uuid as WireUuid,
+};
+use krabka_units::prelude::*;
 use parking_lot::RwLock;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use crate::{
     config::{RegistryConfig, RegistryRuntimeConfig},
@@ -27,7 +38,95 @@ use crate::{
 /// Shared state + offset watch returned by [`spawn`].
 pub struct StoreReader {
     pub store: Arc<RwLock<StoreState>>,
-    pub applied_rx: watch::Receiver<i64>,
+    pub barriers: Arc<BarrierTracker>,
+    pub barrier_rx: watch::Receiver<u64>,
+    failures: Arc<AtomicU64>,
+    pub(crate) unknown_records: Arc<AtomicU64>,
+    pub(crate) undecodable_records: Arc<AtomicU64>,
+}
+
+#[derive(Default)]
+struct Barriers {
+    pending: HashSet<Uuid>,
+    seen: HashSet<Uuid>,
+    invalidated: HashSet<Uuid>,
+}
+
+#[derive(Default)]
+pub struct BarrierTracker {
+    state: RwLock<Barriers>,
+}
+
+pub enum BarrierPoll {
+    Pending,
+    Seen,
+    Invalidated,
+}
+
+impl BarrierTracker {
+    pub fn reserve(&self) -> Uuid {
+        let token = Uuid::new_v4();
+        self.state.write().pending.insert(token);
+        token
+    }
+
+    pub(crate) fn observe(&self, token: Uuid) {
+        let mut state = self.state.write();
+        if state.pending.contains(&token) {
+            state.seen.insert(token);
+        }
+    }
+
+    pub fn poll(&self, token: Uuid) -> BarrierPoll {
+        let mut state = self.state.write();
+        if state.invalidated.remove(&token) {
+            return BarrierPoll::Invalidated;
+        }
+        if !state.seen.remove(&token) {
+            return BarrierPoll::Pending;
+        }
+        state.pending.remove(&token);
+        BarrierPoll::Seen
+    }
+
+    pub fn cancel(&self, token: Uuid) {
+        let mut state = self.state.write();
+        state.pending.remove(&token);
+        state.seen.remove(&token);
+        state.invalidated.remove(&token);
+    }
+
+    pub(crate) fn invalidate_all(&self) {
+        let mut state = self.state.write();
+        let pending = std::mem::take(&mut state.pending);
+        state.seen.clear();
+        state.invalidated.extend(pending);
+    }
+}
+
+struct Rebuild {
+    store: RwLock<StoreState>,
+    end_offset: i64,
+}
+
+impl StoreReader {
+    /// Number of reader connection, metadata, Fetch, and offset-reset failures.
+    #[must_use]
+    pub fn failure_count(&self) -> u64 {
+        self.failures.load(Ordering::Relaxed)
+    }
+
+    #[must_use]
+    /// Number of records whose key type is not supported by this registry.
+    pub fn unknown_record_count(&self) -> u64 {
+        self.unknown_records.load(Ordering::Relaxed)
+    }
+
+    #[must_use]
+    /// Number of records whose known key or value could not be decoded.
+    pub fn undecodable_record_count(&self) -> u64 {
+        self.undecodable_records.load(Ordering::Relaxed)
+    }
 }
 
 /// `PartialEq` but not `Eq`, because the quantities store `f64`.
@@ -50,10 +149,16 @@ fn reader_policy(runtime: &RegistryRuntimeConfig) -> ReaderPolicy {
 enum FetchErrorAction {
     Reconnect,
     RetrySameConnection,
+    ResetToLogStart,
+    RefreshTopic,
 }
 
 fn fetch_error_action(e: &ClientError) -> FetchErrorAction {
     match e {
+        ClientError::Server { error_code: 1 } => FetchErrorAction::ResetToLogStart,
+        ClientError::Server {
+            error_code: 3 | 6 | 100,
+        } => FetchErrorAction::RefreshTopic,
         ClientError::Connect { .. }
         | ClientError::Disconnected
         | ClientError::Timeout(_)
@@ -62,11 +167,156 @@ fn fetch_error_action(e: &ClientError) -> FetchErrorAction {
     }
 }
 
-fn resolve_bootstrap_addr(bootstrap: &str) -> Option<SocketAddr> {
-    bootstrap
-        .split(',')
-        .filter_map(|b| b.trim().to_socket_addrs().ok())
-        .find_map(|mut addrs| addrs.next())
+fn should_log_failure(consecutive: u64) -> bool {
+    consecutive == 1 || consecutive.is_power_of_two()
+}
+
+fn resolve_leader_addr(host: &str, port: i32, topic: &str) -> Result<SocketAddr, ClientError> {
+    let port = u16::try_from(port).map_err(|_| {
+        ClientError::InvalidConfig(format!("invalid leader port {port} for {topic}-0"))
+    })?;
+    (host, port)
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut addrs| addrs.next())
+        .ok_or_else(|| {
+            ClientError::InvalidConfig(format!("cannot resolve leader {host}:{port} for {topic}-0"))
+        })
+}
+
+async fn topic_route(
+    conn: &Connection,
+    topic: &str,
+    current_topic_id: WireUuid,
+) -> Result<(WireUuid, Option<SocketAddr>), ClientError> {
+    let metadata = conn
+        .send(MetadataRequest {
+            topics: Some(vec![MetadataRequestTopic {
+                topic_id: WireUuid::ZERO,
+                name: Some(topic.to_owned()),
+                ..Default::default()
+            }]),
+            allow_auto_topic_creation: false,
+            ..Default::default()
+        })
+        .await?;
+    let topic_metadata = metadata
+        .topics
+        .iter()
+        .find(|entry| entry.name.as_deref() == Some(topic))
+        .ok_or(ClientError::Server { error_code: 3 })?;
+    if topic_metadata.error_code != 0 {
+        return Err(ClientError::Server {
+            error_code: topic_metadata.error_code,
+        });
+    }
+    let partition = topic_metadata
+        .partitions
+        .iter()
+        .find(|partition| partition.partition_index == 0)
+        .ok_or(ClientError::Server { error_code: 3 })?;
+    if partition.error_code != 0 {
+        return Err(ClientError::Server {
+            error_code: partition.error_code,
+        });
+    }
+    let topic_id = if topic_metadata.topic_id == WireUuid::ZERO {
+        current_topic_id
+    } else {
+        topic_metadata.topic_id
+    };
+    let Some(leader) = metadata
+        .brokers
+        .iter()
+        .find(|broker| broker.node_id == partition.leader_id && broker.port > 0)
+    else {
+        return Ok((topic_id, None));
+    };
+    Ok((
+        topic_id,
+        Some(resolve_leader_addr(&leader.host, leader.port, topic)?),
+    ))
+}
+
+async fn connect_topic_leader(
+    bootstrap: &str,
+    opts: &ConnectionOptions,
+    topic: &str,
+    current_topic_id: WireUuid,
+) -> Result<(Connection, WireUuid), ClientError> {
+    let mut last_error = ClientError::Disconnected;
+    for bootstrap_host in bootstrap.split(',').map(str::trim) {
+        let Ok(addrs) = bootstrap_host.to_socket_addrs() else {
+            continue;
+        };
+        for addr in addrs {
+            let conn = match Connection::connect_with_options(addr, opts.clone()).await {
+                Ok(conn) => conn,
+                Err(error) => {
+                    last_error = error;
+                    continue;
+                }
+            };
+            match topic_route(&conn, topic, current_topic_id).await {
+                Ok((topic_id, None)) => return Ok((conn, topic_id)),
+                Ok((topic_id, Some(leader_addr))) => {
+                    conn.close();
+                    match Connection::connect_with_options(leader_addr, opts.clone()).await {
+                        Ok(leader) => return Ok((leader, topic_id)),
+                        Err(error) => last_error = error,
+                    }
+                }
+                Err(error) => {
+                    conn.close();
+                    last_error = error;
+                }
+            }
+        }
+    }
+    Err(last_error)
+}
+
+async fn log_offset(conn: &Connection, topic: &str, timestamp: i64) -> Result<i64, ClientError> {
+    let response = conn
+        .send(ListOffsetsRequest {
+            replica_id: -1,
+            isolation_level: 1,
+            topics: vec![ListOffsetsTopic {
+                name: topic.to_owned(),
+                partitions: vec![ListOffsetsPartition {
+                    partition_index: 0,
+                    timestamp,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await?;
+    let partition = response
+        .topics
+        .iter()
+        .find(|entry| entry.name == topic)
+        .and_then(|entry| {
+            entry
+                .partitions
+                .iter()
+                .find(|partition| partition.partition_index == 0)
+        })
+        .ok_or(ClientError::Server { error_code: 3 })?;
+    if partition.error_code != 0 {
+        return Err(ClientError::Server {
+            error_code: partition.error_code,
+        });
+    }
+    Ok(partition.offset)
+}
+
+async fn log_bounds(conn: &Connection, topic: &str) -> Result<(i64, i64), ClientError> {
+    Ok((
+        log_offset(conn, topic, -2).await?,
+        log_offset(conn, topic, -1).await?,
+    ))
 }
 
 async fn sleep_or_cancel(cancel: &CancellationToken, duration: Time) -> bool {
@@ -74,6 +324,55 @@ async fn sleep_or_cancel(cancel: &CancellationToken, duration: Time) -> bool {
         biased;
         () = cancel.cancelled() => true,
         () = tokio::time::sleep(duration.to_std()) => false,
+    }
+}
+
+fn begin_rebuild(
+    store: &RwLock<StoreState>,
+    defaults: &StoreState,
+    previous: Option<&Rebuild>,
+    next: &mut i64,
+    start_offset: i64,
+    end_offset: i64,
+    preserve_id_high_water: bool,
+) -> Option<Rebuild> {
+    let mut snapshot = defaults.clone();
+    if preserve_id_high_water {
+        snapshot.preserve_id_high_water(&store.read());
+        if let Some(previous) = previous {
+            snapshot.preserve_id_high_water(&previous.store.read());
+        }
+    }
+    *next = start_offset;
+    if start_offset >= end_offset {
+        *store.write() = snapshot;
+        return None;
+    }
+    Some(Rebuild {
+        store: RwLock::new(snapshot),
+        end_offset,
+    })
+}
+
+fn barrier_token(key: &[u8], value: Option<&[u8]>) -> Option<Uuid> {
+    let key: serde_json::Value = serde_json::from_slice(key).ok()?;
+    if key.get("keytype")?.as_str()? != "NOOP" {
+        return None;
+    }
+    if let Some(token) = key.get("barrier").and_then(|token| token.as_str()) {
+        return token.parse().ok();
+    }
+    let value: serde_json::Value = serde_json::from_slice(value?).ok()?;
+    value.get("barrier")?.as_str()?.parse().ok()
+}
+
+fn complete_rebuild(live: &RwLock<StoreState>, rebuild: &mut Option<Rebuild>, next: i64) {
+    if rebuild
+        .as_ref()
+        .is_some_and(|snapshot| next >= snapshot.end_offset)
+        && let Some(snapshot) = rebuild.take()
+    {
+        *live.write() = snapshot.store.into_inner();
     }
 }
 
@@ -90,6 +389,11 @@ pub fn apply_record(store: &RwLock<StoreState>, rec: SchemaRecord) {
         }
         SchemaRecord::DeleteSubject(k, _v) => {
             store.write().soft_delete_subject(&k.subject);
+        }
+        SchemaRecord::VersionHighWater(k, v) => {
+            store
+                .write()
+                .observe_next_version(&k.subject, v.next_version);
         }
         SchemaRecord::Mode(k, Some(v)) => {
             let mut s = store.write();
@@ -122,13 +426,48 @@ pub fn apply_record(store: &RwLock<StoreState>, rec: SchemaRecord) {
                 store.write().clear_subject_compat(&subj);
             }
         }
-        SchemaRecord::Noop | SchemaRecord::Unknown => {}
+        SchemaRecord::Noop | SchemaRecord::Unknown { .. } | SchemaRecord::Undecodable { .. } => {}
     }
+}
+
+fn account_unsupported(
+    record: SchemaRecord,
+    offset: i64,
+    unknown: &AtomicU64,
+    undecodable: &AtomicU64,
+) -> SchemaRecord {
+    match &record {
+        SchemaRecord::Unknown { keytype } => {
+            let count = unknown.fetch_add(1, Ordering::Relaxed) + 1;
+            if count.is_power_of_two() {
+                tracing::warn!(
+                    offset,
+                    keytype,
+                    count,
+                    "store reader: unsupported schema record"
+                );
+            }
+        }
+        SchemaRecord::Undecodable { keytype } => {
+            let count = undecodable.fetch_add(1, Ordering::Relaxed) + 1;
+            if count.is_power_of_two() {
+                tracing::warn!(
+                    offset,
+                    ?keytype,
+                    count,
+                    "store reader: undecodable schema record"
+                );
+            }
+        }
+        _ => {}
+    }
+    record
 }
 
 /// Spawn the reader. It returns the shared store and an offset watch
 /// immediately. The background task runs until `cancel` fires.
 #[must_use]
+#[allow(clippy::too_many_lines)] // One select loop owns the reader state machine.
 pub fn spawn(
     cfg: &RegistryConfig,
     topic_id: WireUuid,
@@ -136,8 +475,11 @@ pub fn spawn(
     security: Option<ClientSecurity>,
     cancel: CancellationToken,
 ) -> StoreReader {
+    let defaults = initial_state.clone();
     let store = Arc::new(RwLock::new(initial_state));
-    let (applied_tx, applied_rx) = watch::channel(-1_i64);
+    let barriers = Arc::new(BarrierTracker::default());
+    let barriers_bg = barriers.clone();
+    let (barrier_tx, barrier_rx) = watch::channel(0_u64);
     let topic = cfg.schemas_topic.clone();
     let bootstrap = cfg.bootstrap.clone();
     let client_id = format!("{}-reader", cfg.client_id);
@@ -145,6 +487,12 @@ pub fn spawn(
     let policy = reader_policy(&cfg.runtime);
     let dispatch_queue_capacity = cfg.runtime.client_dispatch_queue_capacity;
     let frame_max = cfg.runtime.client_frame_max;
+    let failures = Arc::new(AtomicU64::new(0));
+    let failures_bg = failures.clone();
+    let unknown_records = Arc::new(AtomicU64::new(0));
+    let unknown_records_bg = unknown_records.clone();
+    let undecodable_records = Arc::new(AtomicU64::new(0));
+    let undecodable_records_bg = undecodable_records.clone();
 
     tokio::spawn(async move {
         let opts = ConnectionOptions {
@@ -155,18 +503,59 @@ pub fn spawn(
             ..Default::default()
         };
         let mut next = 0_i64;
+        let mut topic_id = topic_id;
+        let mut rebuild = None;
+        let mut observed_barriers = Vec::new();
+        let mut consecutive_failures = 0_u64;
         loop {
-            let Some(addr) = resolve_bootstrap_addr(&bootstrap) else {
-                tracing::error!(%bootstrap, "store reader: bad bootstrap addr; backing off");
-                if sleep_or_cancel(&cancel, policy.retry_backoff).await {
-                    return;
+            let conn = match connect_topic_leader(&bootstrap, &opts, &topic, topic_id).await {
+                Ok((conn, resolved_topic_id)) => {
+                    if topic_id != WireUuid::ZERO && resolved_topic_id != topic_id {
+                        observed_barriers.clear();
+                        barriers_bg.invalidate_all();
+                        barrier_tx.send_modify(|version| *version += 1);
+                        tracing::warn!(
+                            old_topic_id = ?topic_id,
+                            new_topic_id = ?resolved_topic_id,
+                            "store reader: schema topic was recreated; rebuilding state"
+                        );
+                        match log_bounds(&conn, &topic).await {
+                            Ok((start, end)) => {
+                                rebuild = begin_rebuild(
+                                    &store_bg, &defaults, None, &mut next, start, end, false,
+                                );
+                            }
+                            Err(error) => {
+                                conn.close();
+                                consecutive_failures += 1;
+                                failures_bg.fetch_add(1, Ordering::Relaxed);
+                                if should_log_failure(consecutive_failures) {
+                                    tracing::warn!(
+                                        error = %error,
+                                        consecutive_failures,
+                                        "store reader: replacement topic bounds failed; backing off"
+                                    );
+                                }
+                                if sleep_or_cancel(&cancel, policy.retry_backoff).await {
+                                    return;
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                    topic_id = resolved_topic_id;
+                    conn
                 }
-                continue;
-            };
-            let conn = match Connection::connect_with_options(addr, opts.clone()).await {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!(error = %e, "store reader: connect failed; backing off");
+                Err(error) => {
+                    consecutive_failures += 1;
+                    failures_bg.fetch_add(1, Ordering::Relaxed);
+                    if should_log_failure(consecutive_failures) {
+                        tracing::warn!(
+                            error = %error,
+                            consecutive_failures,
+                            "store reader: leader resolution failed; backing off"
+                        );
+                    }
                     if sleep_or_cancel(&cancel, policy.retry_backoff).await {
                         return;
                     }
@@ -194,40 +583,96 @@ pub fn spawn(
                     }) => {
                         match res {
                             Ok(progress) => {
+                                consecutive_failures = 0;
                                 for r in progress.records {
                                     if r.offset < next {
                                         continue;
                                     }
                                     let key = r.key.as_deref().unwrap_or_default();
-                                    apply_record(
-                                        &store_bg,
+                                    if let Some(token) = barrier_token(key, r.value.as_deref()) {
+                                        observed_barriers.push(token);
+                                    }
+                                    let record = account_unsupported(
                                         SchemaRecord::decode(key, r.value.as_deref()),
+                                        r.offset,
+                                        &unknown_records_bg,
+                                        &undecodable_records_bg,
                                     );
+                                    if let Some(rebuild) = &mut rebuild {
+                                        apply_record(&rebuild.store, record);
+                                    } else {
+                                        apply_record(&store_bg, record);
+                                    }
                                 }
                                 if let Some(cursor) = progress.next_offset {
                                     next = next.max(cursor);
-                                    // Publish cursor progress after all visible
-                                    // records have been applied. This also
-                                    // advances over aborted/control batches.
-                                    let _ = applied_tx.send(next - 1);
+                                    complete_rebuild(&store_bg, &mut rebuild, next);
+                                    // Publish only after applying visible records, including empty control batches.
+                                    if rebuild.is_none() {
+                                        for token in observed_barriers.drain(..) {
+                                            barriers_bg.observe(token);
+                                        }
+                                        barrier_tx.send_modify(|version| *version += 1);
+                                    }
                                 }
                             }
-                            Err(e) => {
-                                let action = fetch_error_action(&e);
-                                tracing::warn!(
-                                    error = %e,
-                                    action = ?action,
-                                    "store reader: fetch error; backing off"
-                                );
-                                if action == FetchErrorAction::Reconnect {
-                                    conn.close();
-                                    if sleep_or_cancel(&cancel, policy.retry_backoff).await {
-                                        return;
+                            Err(error) => {
+                                let action = fetch_error_action(&error);
+                                consecutive_failures += 1;
+                                failures_bg.fetch_add(1, Ordering::Relaxed);
+                                if should_log_failure(consecutive_failures) {
+                                    tracing::warn!(
+                                        error = %error,
+                                        action = ?action,
+                                        consecutive_failures,
+                                        "store reader: fetch error; backing off"
+                                    );
+                                }
+                                if action == FetchErrorAction::ResetToLogStart {
+                                    match log_bounds(&conn, &topic).await {
+                                        Ok((start, end)) => {
+                                            tracing::warn!(
+                                                fetch_offset = next,
+                                                log_start_offset = start,
+                                                "store reader: requested history was compacted away; resetting to log start"
+                                            );
+                                            rebuild = begin_rebuild(
+                                                &store_bg,
+                                                &defaults,
+                                                rebuild.as_ref(),
+                                                &mut next,
+                                                start,
+                                                end,
+                                                true,
+                                            );
+                                        }
+                                        Err(reset_error) => {
+                                            consecutive_failures += 1;
+                                            failures_bg.fetch_add(1, Ordering::Relaxed);
+                                            if should_log_failure(consecutive_failures) {
+                                                tracing::warn!(
+                                                    error = %reset_error,
+                                                    consecutive_failures,
+                                                    "store reader: log-start reset failed; backing off"
+                                                );
+                                            }
+                                            conn.close();
+                                            if sleep_or_cancel(&cancel, policy.retry_backoff).await {
+                                                return;
+                                            }
+                                            break;
+                                        }
                                     }
-                                    break;
                                 }
                                 if sleep_or_cancel(&cancel, policy.retry_backoff).await {
                                     return;
+                                }
+                                if matches!(
+                                    action,
+                                    FetchErrorAction::Reconnect | FetchErrorAction::RefreshTopic
+                                ) {
+                                    conn.close();
+                                    break;
                                 }
                             }
                         }
@@ -237,18 +682,26 @@ pub fn spawn(
         }
     });
 
-    StoreReader { store, applied_rx }
+    StoreReader {
+        store,
+        barriers,
+        barrier_rx,
+        failures,
+        unknown_records,
+        undecodable_records,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::io;
 
-    use crabka_client_core::ClientError;
+    use krabka_client_core::ClientError;
 
     use super::*;
     use crate::{
         config::RegistryRuntimeConfig,
+        format::SchemaType,
         ids::{SchemaId, SchemaVersion},
         kafkastore::record::{SchemaKey, SchemaValue},
     };
@@ -285,6 +738,7 @@ mod tests {
             references: vec![],
             schema: "{\"type\":\"int\"}".into(),
             deleted: false,
+            extra: std::collections::BTreeMap::default(),
         };
         apply_record(&store, SchemaRecord::Schema(k, v));
         apply_record(&store, SchemaRecord::Noop);
@@ -296,8 +750,28 @@ mod tests {
     }
 
     #[test]
-    fn fetch_transport_errors_force_reader_reconnect() {
+    fn fetch_errors_choose_recovery_action() {
         let cases = [
+            (
+                "offset out of range",
+                ClientError::Server { error_code: 1 },
+                FetchErrorAction::ResetToLogStart,
+            ),
+            (
+                "unknown topic or partition",
+                ClientError::Server { error_code: 3 },
+                FetchErrorAction::RefreshTopic,
+            ),
+            (
+                "not leader or follower",
+                ClientError::Server { error_code: 6 },
+                FetchErrorAction::RefreshTopic,
+            ),
+            (
+                "unknown topic id",
+                ClientError::Server { error_code: 100 },
+                FetchErrorAction::RefreshTopic,
+            ),
             (
                 "disconnected",
                 ClientError::Disconnected,
@@ -305,7 +779,7 @@ mod tests {
             ),
             (
                 "timeout",
-                ClientError::Timeout(crabka_units::millis(1)),
+                ClientError::Timeout(krabka_units::millis(1)),
                 FetchErrorAction::Reconnect,
             ),
             (
@@ -322,8 +796,8 @@ mod tests {
                 FetchErrorAction::Reconnect,
             ),
             (
-                "server",
-                ClientError::Server { error_code: 6 },
+                "other server error",
+                ClientError::Server { error_code: 7 },
                 FetchErrorAction::RetrySameConnection,
             ),
         ];
@@ -333,8 +807,172 @@ mod tests {
     }
 
     #[test]
+    fn retry_warnings_are_rate_limited() {
+        let logged: Vec<u64> = (1..=16)
+            .filter(|count| should_log_failure(*count))
+            .collect();
+        assert2::check!(logged == vec![1, 2, 4, 8, 16]);
+    }
+
+    #[test]
+    fn unsupported_records_are_classified_and_counted_with_offsets() {
+        let unknown = AtomicU64::new(0);
+        let undecodable = AtomicU64::new(0);
+        let store = RwLock::new(StoreState::default());
+
+        for (offset, key, value) in [
+            (41, br#"{"keytype":"CONTEXT","magic":1}"#.as_slice(), None),
+            (
+                42,
+                br#"{"keytype":"SCHEMA","subject":"s","version":1,"magic":1}"#.as_slice(),
+                Some(br#"{"broken":true}"#.as_slice()),
+            ),
+        ] {
+            let record = account_unsupported(
+                SchemaRecord::decode(key, value),
+                offset,
+                &unknown,
+                &undecodable,
+            );
+            apply_record(&store, record);
+        }
+
+        assert2::check!(unknown.load(Ordering::Relaxed) == 1);
+        assert2::check!(undecodable.load(Ordering::Relaxed) == 1);
+    }
+
+    #[test]
+    fn rebuild_keeps_live_state_until_snapshot_is_complete() {
+        let defaults = StoreState::default();
+        let store = RwLock::new(defaults.clone());
+        apply_record(
+            &store,
+            SchemaRecord::Schema(
+                SchemaKey::new("stale", SchemaVersion(1)),
+                SchemaValue {
+                    subject: "stale".into(),
+                    version: SchemaVersion(1),
+                    id: SchemaId(1),
+                    schema_type: None,
+                    message_type: None,
+                    references: vec![],
+                    schema: r#"{"type":"string"}"#.into(),
+                    deleted: false,
+                    extra: std::collections::BTreeMap::default(),
+                },
+            ),
+        );
+        let mut next = 42;
+
+        let mut rebuild = begin_rebuild(&store, &defaults, None, &mut next, 7, 9, false);
+
+        assert2::check!(store.read().versions("stale", true).is_some());
+        assert2::check!(
+            rebuild
+                .as_ref()
+                .unwrap()
+                .store
+                .read()
+                .versions("stale", true)
+                .is_none()
+        );
+        assert2::check!(next == 7);
+        complete_rebuild(&store, &mut rebuild, 8);
+        assert2::check!(store.read().versions("stale", true).is_some());
+        complete_rebuild(&store, &mut rebuild, 9);
+        assert2::check!(store.read().versions("stale", true).is_none());
+        assert2::check!(rebuild.is_none());
+    }
+
+    #[test]
+    fn repeated_same_topic_rebuild_preserves_id_high_water() {
+        let defaults = StoreState::default();
+        let store = RwLock::new(defaults.clone());
+        apply_record(
+            &store,
+            SchemaRecord::Schema(
+                SchemaKey::new("old", SchemaVersion(1)),
+                SchemaValue {
+                    subject: "old".into(),
+                    version: SchemaVersion(1),
+                    id: SchemaId(7),
+                    schema_type: None,
+                    message_type: None,
+                    references: vec![],
+                    schema: r#"{"type":"string"}"#.into(),
+                    deleted: false,
+                    extra: std::collections::BTreeMap::default(),
+                },
+            ),
+        );
+        let mut next = 42;
+
+        let rebuild = begin_rebuild(&store, &defaults, None, &mut next, 7, 9, true).unwrap();
+        let registered = rebuild
+            .store
+            .write()
+            .register("new", SchemaType::Avro, r#"{"type":"int"}"#, &[], None)
+            .unwrap();
+
+        assert2::check!(registered.id == SchemaId(8));
+
+        apply_record(
+            &rebuild.store,
+            SchemaRecord::Schema(
+                SchemaKey::new("compacted", SchemaVersion(1)),
+                SchemaValue {
+                    subject: "compacted".into(),
+                    version: SchemaVersion(1),
+                    id: SchemaId(11),
+                    schema_type: None,
+                    message_type: None,
+                    references: vec![],
+                    schema: r#"{"type":"long"}"#.into(),
+                    deleted: false,
+                    extra: std::collections::BTreeMap::default(),
+                },
+            ),
+        );
+        let replacement =
+            begin_rebuild(&store, &defaults, Some(&rebuild), &mut next, 12, 14, true).unwrap();
+        let registered = replacement
+            .store
+            .write()
+            .register("latest", SchemaType::Avro, r#"{"type":"int"}"#, &[], None)
+            .unwrap();
+
+        assert2::check!(registered.id == SchemaId(12));
+    }
+
+    #[test]
+    fn barrier_tokens_are_read_from_noop_values() {
+        let token = Uuid::new_v4();
+        let value = format!(r#"{{"barrier":"{token}"}}"#);
+        assert2::check!(
+            barrier_token(br#"{"keytype":"NOOP","magic":0}"#, Some(value.as_bytes()),)
+                == Some(token)
+        );
+        let key = format!(r#"{{"keytype":"NOOP","magic":0,"barrier":"{token}"}}"#);
+        assert2::check!(barrier_token(key.as_bytes(), None) == Some(token));
+        assert2::check!(
+            barrier_token(br#"{"keytype":"CONFIG"}"#, Some(value.as_bytes())).is_none()
+        );
+    }
+
+    #[test]
+    fn leader_address_supports_ipv6_literals() {
+        assert2::check!(
+            resolve_leader_addr("::1", 9092, "_schemas").unwrap()
+                == "[::1]:9092".parse::<SocketAddr>().unwrap()
+        );
+    }
+
+    #[test]
     fn apply_record_handles_mode_delete_tombstone() {
-        use crate::kafkastore::record::{DeleteSubjectKey, DeleteSubjectValue, ModeKey, ModeValue};
+        use crate::kafkastore::record::{
+            DeleteSubjectKey, DeleteSubjectValue, ModeKey, ModeValue, VersionHighWaterKey,
+            VersionHighWaterValue,
+        };
         let store = RwLock::new(StoreState::default());
         let v = SchemaValue {
             subject: "s".into(),
@@ -345,6 +983,7 @@ mod tests {
             references: vec![],
             schema: "{\"type\":\"int\"}".into(),
             deleted: false,
+            extra: std::collections::BTreeMap::default(),
         };
         apply_record(
             &store,
@@ -425,5 +1064,30 @@ mod tests {
             SchemaRecord::Tombstone(SchemaKey::new("s", SchemaVersion(1))),
         );
         assert2::assert!(store.read().versions("s", true).is_none());
+
+        apply_record(
+            &store,
+            SchemaRecord::VersionHighWater(
+                VersionHighWaterKey {
+                    keytype: "NOOP".into(),
+                    subject: "compacted".into(),
+                    magic: 0,
+                },
+                VersionHighWaterValue {
+                    next_version: SchemaVersion(4),
+                },
+            ),
+        );
+        let registered = store
+            .write()
+            .register(
+                "compacted",
+                SchemaType::Avro,
+                "{\"type\":\"int\"}",
+                &[],
+                None,
+            )
+            .unwrap();
+        assert2::assert!(registered.version == SchemaVersion(4));
     }
 }

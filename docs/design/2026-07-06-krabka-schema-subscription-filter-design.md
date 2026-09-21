@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-06
 **Status:** Approved
-**Type:** Subsystem design. First buildable sub-service of the [serverless-backend vision](2026-07-06-crabka-serverless-backend-vision-design.md) — Chapter G's topic-side.
+**Type:** Subsystem design. First buildable sub-service of the [serverless-backend vision](2026-07-06-krabka-serverless-backend-vision-design.md) — Chapter G's topic-side.
 
 ## Context — where this sits
 

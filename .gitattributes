@@ -29,3 +29,6 @@ crates/gres-conformance/corpus-regress/int4/int4.out       -whitespace
 *.jar      binary
 *.png      binary
 *.ico      binary
+
+# Helm templates are YAML-shaped Go templates, not parseable YAML.
+charts/*/templates/** rules-lint-ignored

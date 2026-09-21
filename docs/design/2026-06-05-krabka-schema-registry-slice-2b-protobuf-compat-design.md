@@ -1,9 +1,9 @@
-# Crabka Schema Registry — Slice 2b: Protobuf compatibility (full Confluent parity) — design
+# Krabka Schema Registry — Slice 2b: Protobuf compatibility (full Confluent parity) — design
 
 - **Date:** 2026-06-05
 - **Status:** Approved (brainstorm); ready for an implementation plan
 - **Builds on:** slice 2 (PR #395) — the format-agnostic `compat` engine, the `format::check(ty, reader, writer)` seam (Avro real; Protobuf/JSON permissive placeholders), 409 enforcement on register, the real `/compatibility` endpoint, and the golden-matrix-from-`cp-schema-registry` validation pattern.
-- **Parent roadmap:** `docs/superpowers/specs/2026-06-04-crabka-schema-registry-design.md` (slice 2b).
+- **Parent roadmap:** `docs/superpowers/specs/2026-06-04-krabka-schema-registry-design.md` (slice 2b).
 
 ## Motivation
 

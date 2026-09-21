@@ -1,6 +1,6 @@
 //! Topic-ACL authorization for the registry REST surface.
 //!
-//! This module reuses Kafka's ACL model through `crabka-authz`. Each schema
+//! This module reuses Kafka's ACL model through `krabka-authz`. Each schema
 //! *subject* maps to a `ResourceType::Topic` ACL by subject name.
 //! Cluster-global operations map to `ResourceType::Cluster` name
 //! `"kafka-cluster"`. ACLs come from the broker's `DescribeAcls` into an
@@ -16,15 +16,18 @@ use std::{collections::HashSet, net::SocketAddr, sync::Arc};
 
 use arc_swap::ArcSwap;
 use axum::{
-    extract::{Request, State},
-    http::{Method, StatusCode},
+    extract::{ConnectInfo, Request, State},
+    http::Method,
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use crabka_authz::{AclCache, AuthorizationRequest, AuthorizationResult, Authorizer};
-use crabka_metadata::{AclOperation, ResourceType};
-use crabka_security::Principal;
-use crabka_units::prelude::*;
+use krabka_audit::{
+    AuditEndpoint, AuditEvent, AuditLog, AuditOutcome, AuditPrincipal, AuditResource,
+};
+use krabka_authz::{AclCache, AuthorizationRequest, AuthorizationResult, Authorizer};
+use krabka_metadata::{AclOperation, ResourceType};
+use krabka_security::Principal;
+use krabka_units::prelude::*;
 use tokio_util::sync::CancellationToken;
 
 /// The `ResourceType::Cluster` resource name for cluster-global operations,
@@ -100,9 +103,10 @@ pub fn authz_target(method: &Method, path: &str) -> Option<(ResourceType, String
             Method::GET => cluster(AclOperation::Describe),
             _ => None,
         },
-        // Per-subject compatibility level.
+        // Per-subject compatibility level. Deleting an override is also an
+        // alteration of the subject's configuration.
         ["config", subject] => match *method {
-            Method::PUT => topic(subject, AclOperation::Alter),
+            Method::PUT | Method::DELETE => topic(subject, AclOperation::Alter),
             Method::GET => topic(subject, AclOperation::Describe),
             _ => None,
         },
@@ -126,8 +130,10 @@ pub fn authz_target(method: &Method, path: &str) -> Option<(ResourceType, String
         // POST /schemas/import — bulk-register a FileDescriptorSet spanning
         // multiple subjects, so authorize it as a cluster-level schema write.
         ["schemas", "import"] if method == Method::POST => cluster(AclOperation::Write),
-        // GET /schemas/ids/{id} and GET /schemas — read schemas by id / list all.
-        ["schemas", "ids", _] | ["schemas"] | ["schemas", "ids", _, "versions"]
+        // Schema-id lookups and the global schema list expose cluster metadata.
+        ["schemas", "ids", _]
+        | ["schemas"]
+        | ["schemas", "ids", _, "versions" | "schema" | "subjects"]
             if method == Method::GET =>
         {
             cluster(AclOperation::Read)
@@ -140,10 +146,11 @@ pub fn authz_target(method: &Method, path: &str) -> Option<(ResourceType, String
 
 /// Topic-ACL authorization decision point for the registry.
 ///
-/// It holds the [`Authorizer`], which is a `crabka-authz` evaluator, and an
+/// It holds the [`Authorizer`], which is a `krabka-authz` evaluator, and an
 /// `ArcSwap`'d [`AclCache`] that [`Self::run_acl_refresh`] refreshes from the
 /// broker's `DescribeAcls`. It mirrors `grpc-gateway`'s `GatewayAuthz`.
 pub struct SchemaRegistryAuthz {
+    audit: Arc<AuditLog>,
     authorizer: Arc<dyn Authorizer>,
     cache: ArcSwap<AclCache>,
     super_users: HashSet<String>,
@@ -155,13 +162,20 @@ impl SchemaRegistryAuthz {
     /// request is allowed, which is the authz-disabled default. The
     /// super-user bypass is enforced both by the name short-circuit in
     /// [`Self::authorize`] and by the underlying
-    /// [`crabka_authz::SimpleAclAuthorizer`], which is constructed with the
+    /// [`krabka_authz::SimpleAclAuthorizer`], which is constructed with the
     /// same set.
     #[must_use]
     pub fn new(super_users: HashSet<String>, enabled: bool) -> Self {
+        Self::with_audit(super_users, enabled, AuditLog::disabled())
+    }
+
+    /// Build with an audit event channel.
+    #[must_use]
+    pub fn with_audit(super_users: HashSet<String>, enabled: bool, audit: Arc<AuditLog>) -> Self {
         let authorizer: Arc<dyn Authorizer> =
-            Arc::new(crabka_authz::SimpleAclAuthorizer::new(super_users.clone()));
+            Arc::new(krabka_authz::SimpleAclAuthorizer::new(super_users.clone()));
         Self {
+            audit,
             authorizer,
             cache: ArcSwap::from_pointee(AclCache::default()),
             super_users,
@@ -174,13 +188,13 @@ impl SchemaRegistryAuthz {
     /// warning.
     pub async fn run_acl_refresh(
         &self,
-        mut admin: crabka_client_admin::AdminClient,
+        mut admin: krabka_client_admin::AdminClient,
         refresh: Time,
         shutdown: CancellationToken,
     ) {
         loop {
             match admin
-                .describe_acls(&crabka_client_admin::AclEntryFilter::default())
+                .describe_acls(&krabka_client_admin::AclEntryFilter::default())
                 .await
             {
                 Ok(entries) => {
@@ -228,15 +242,15 @@ impl SchemaRegistryAuthz {
     }
 }
 
-/// Convert a `crabka_client_admin::AclEntry` into a `crabka_metadata::AclEntry`.
+/// Convert a `krabka_client_admin::AclEntry` into a `krabka_metadata::AclEntry`.
 /// The admin crate keeps a structurally identical local copy, with the same
 /// field names and enum variants, to avoid a broker dependency. This function
 /// maps between them.
-fn acl_entry_from_admin(e: crabka_client_admin::AclEntry) -> crabka_metadata::AclEntry {
-    use crabka_client_admin::{
+fn acl_entry_from_admin(e: krabka_client_admin::AclEntry) -> krabka_metadata::AclEntry {
+    use krabka_client_admin::{
         AclOperation as AO, PatternType as PT, PermissionType as Perm, ResourceType as RT,
     };
-    use crabka_metadata::{
+    use krabka_metadata::{
         AclEntry as ME, AclOperation as MAO, PatternType as MPT, PermissionType as MPerm,
         ResourceType as MRT,
     };
@@ -283,8 +297,7 @@ fn acl_entry_from_admin(e: crabka_client_admin::AclEntry) -> crabka_metadata::Ac
 
 /// `from_fn_with_state` middleware that gates each request.
 ///
-/// Trusted intra-cluster forwards, which carry
-/// [`crate::rest::forward::FORWARD_HEADER`], skip authz. The receiving node
+/// Authenticated intra-cluster forwards skip authz because the ingress node
 /// already authorized them. Paths with no authz requirement, where
 /// [`authz_target`] returns `None`, pass through. On deny the middleware
 /// returns `403`.
@@ -293,14 +306,10 @@ pub async fn authz_layer(
     req: Request,
     next: Next,
 ) -> Response {
-    // SECURITY: a request carrying the inter-node forward header skips authz — the
-    // ingress node already authorized it. This trusts the inter-node link: a CLIENT
-    // that sets `X-Forwarded-For-Registry` directly bypasses authz on this node.
-    // Operators MUST isolate the inter-node forwarding link (network policy /
-    // inter-node mTLS) so external clients cannot reach it.
     if req
-        .headers()
-        .contains_key(crate::rest::forward::FORWARD_HEADER)
+        .extensions()
+        .get::<crate::auth::AuthenticatedForward>()
+        .is_some()
     {
         return next.run(req).await;
     }
@@ -312,23 +321,60 @@ pub async fn authz_layer(
         .get::<Principal>()
         .cloned()
         .unwrap_or_else(crate::auth::anonymous);
-    // The TLS accept loop inserts the peer `SocketAddr` into extensions (the
-    // gateway pattern); fall back to a wildcard host when it is absent (e.g.
-    // plain HTTP without peer wiring). Host-scoped ACLs are rare.
-    let host: SocketAddr = req
+    let host = req
         .extensions()
-        .get::<SocketAddr>()
-        .copied()
-        .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 0)));
-    if az.authorize(&principal, &host, rt, &name, op) {
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(host)| *host);
+    if host.is_none() {
+        tracing::warn!("schema registry authorization request has no peer address");
+    }
+    let allowed = host.is_some_and(|host| az.authorize(&principal, &host, rt, &name, op));
+    let source = host.map_or(
+        AuditEndpoint {
+            ip: "unknown".into(),
+            port: 0,
+        },
+        |host| AuditEndpoint {
+            ip: host.ip().to_string(),
+            port: host.port(),
+        },
+    );
+    let audit_principal = AuditPrincipal {
+        name: principal.name.clone(),
+        auth_method: crate::auth::audit_auth_method(principal.auth_method).into(),
+    };
+    let operation = format!("{} {} {:?}", req.method(), req.uri().path(), op);
+    if allowed {
+        az.audit.emit(AuditEvent::AdminOperation {
+            outcome: AuditOutcome::Success,
+            principal: audit_principal,
+            source,
+            operation,
+            resources: vec![AuditResource {
+                resource_type: format!("{rt:?}"),
+                name,
+            }],
+            time_ms: crate::auth::now_ms(),
+        });
         next.run(req).await
     } else {
-        (StatusCode::FORBIDDEN, "authorization denied").into_response()
+        az.audit.emit(AuditEvent::AuthorizationDenied {
+            principal: audit_principal,
+            source,
+            resource_type: format!("{rt:?}"),
+            resource_name: name,
+            operation,
+            time_ms: crate::auth::now_ms(),
+        });
+        crate::error::SrError::Forbidden.into_response()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use axum::http::{StatusCode, header};
+    use base64::Engine as _;
+
     use super::*;
 
     fn t(m: &str, p: &str) -> Option<(ResourceType, String, AclOperation)> {
@@ -347,9 +393,10 @@ mod tests {
             ("DELETE", "/subjects/s/versions"),
             ("PUT", "/subjects/s/versions/1"),
             ("DELETE", "/config"),
-            ("DELETE", "/config/s"),
             ("DELETE", "/mode"),
             ("POST", "/mode/s"),
+            ("GET", "/schemas/import"),
+            ("PUT", "/schemas/import"),
         ] {
             assert2::assert!(t(m, p) == None);
         }
@@ -359,25 +406,25 @@ mod tests {
     fn acl_entry_from_admin_maps_two_phase_commit() {
         // KIP-939: the admin→metadata ACL conversion must carry TwoPhaseCommit
         // through (it is the operation a 2PC grant on a TransactionalId uses).
-        let admin = crabka_client_admin::AclEntry {
-            resource_type: crabka_client_admin::ResourceType::TransactionalId,
+        let admin = krabka_client_admin::AclEntry {
+            resource_type: krabka_client_admin::ResourceType::TransactionalId,
             resource_name: "my-txn".into(),
-            pattern_type: crabka_client_admin::PatternType::Literal,
+            pattern_type: krabka_client_admin::PatternType::Literal,
             principal: "User:flink".into(),
             host: "*".into(),
-            operation: crabka_client_admin::AclOperation::TwoPhaseCommit,
-            permission_type: crabka_client_admin::PermissionType::Allow,
+            operation: krabka_client_admin::AclOperation::TwoPhaseCommit,
+            permission_type: krabka_client_admin::PermissionType::Allow,
         };
         let meta = acl_entry_from_admin(admin);
         assert2::assert!(
-            meta == crabka_metadata::AclEntry {
-                resource_type: crabka_metadata::ResourceType::TransactionalId,
+            meta == krabka_metadata::AclEntry {
+                resource_type: krabka_metadata::ResourceType::TransactionalId,
                 resource_name: "my-txn".to_string(),
-                pattern_type: crabka_metadata::PatternType::Literal,
+                pattern_type: krabka_metadata::PatternType::Literal,
                 principal: "User:flink".to_string(),
                 host: "*".to_string(),
-                operation: crabka_metadata::AclOperation::TwoPhaseCommit,
-                permission_type: crabka_metadata::PermissionType::Allow,
+                operation: krabka_metadata::AclOperation::TwoPhaseCommit,
+                permission_type: krabka_metadata::PermissionType::Allow,
             }
         );
     }
@@ -448,6 +495,12 @@ mod tests {
             Some((Topic, "s", Describe)),
         ),
         (
+            "delete-subject-config",
+            "DELETE",
+            "/config/s",
+            Some((Topic, "s", Alter)),
+        ),
+        (
             "delete-subject-mode",
             "DELETE",
             "/mode/s",
@@ -490,6 +543,18 @@ mod tests {
             Some((Cluster, "kafka-cluster", Read)),
         ),
         (
+            "schema-by-id-raw",
+            "GET",
+            "/schemas/ids/1/schema",
+            Some((Cluster, "kafka-cluster", Read)),
+        ),
+        (
+            "schema-by-id-subjects",
+            "GET",
+            "/schemas/ids/1/subjects",
+            Some((Cluster, "kafka-cluster", Read)),
+        ),
+        (
             "list-schemas",
             "GET",
             "/schemas",
@@ -501,8 +566,6 @@ mod tests {
             "/schemas/import",
             Some((Cluster, "kafka-cluster", Write)),
         ),
-        ("get-import-unmapped", "GET", "/schemas/import", None),
-        ("put-import-unmapped", "PUT", "/schemas/import", None),
         (
             "schema-types",
             "GET",
@@ -549,18 +612,19 @@ mod tests {
     ];
 
     #[test]
-    fn route_mappings_are_named_and_table_driven() {
+    fn every_registered_route_has_an_authz_target_or_explicit_exemption() {
         for (_name, method, path, expected) in ROUTE_MAPPING_CASES {
             let expected = expected.map(|(resource_type, resource_name, operation)| {
                 (resource_type, resource_name.to_string(), operation)
             });
             assert2::assert!(t(method, path) == expected);
+            assert2::assert!(expected.is_some() || (*method == "GET" && *path == "/"));
         }
     }
 
     // ---- SchemaRegistryAuthz::authorize ----------------------------------
 
-    use crabka_metadata::{AclEntry, PatternType, PermissionType};
+    use krabka_metadata::{AclEntry, PatternType, PermissionType};
 
     fn host() -> SocketAddr {
         "0.0.0.0:0".parse().unwrap()
@@ -582,7 +646,7 @@ mod tests {
     fn alice() -> Principal {
         Principal {
             name: "alice".into(),
-            auth_method: crabka_security::AuthMethod::SaslPlain,
+            auth_method: krabka_security::AuthMethod::SaslPlain,
             groups: vec![],
         }
     }
@@ -743,15 +807,175 @@ mod tests {
                 permission_type: PermissionType::Allow,
             });
             let app = authz_app(with_acls(HashSet::new(), true, acls.into_iter().collect()));
-            let mut request = Request::builder().method(method).uri(path);
+            let mut request = Request::builder()
+                .method(method)
+                .uri(path)
+                .extension(ConnectInfo(host()));
             if forwarded {
-                request = request.header(crate::rest::forward::FORWARD_HEADER, "ingress-node");
+                request = request.extension(crate::auth::AuthenticatedForward);
             }
             let response = app
                 .oneshot(request.body(Body::empty()).unwrap())
                 .await
                 .unwrap();
             assert2::assert!(response.status() == expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn security_outcomes_emit_redacted_audit_records() {
+        use krabka_audit::{AuditRecord, AuditSink as _, MemorySink, ProductInfo};
+
+        let (audit, mut events) = AuditLog::new(8);
+        let auth = crate::auth::AuthState {
+            audit: audit.clone(),
+            basic: Some(Arc::new(crate::auth::basic::BasicAuthStore::from_users(
+                [("alice".to_string(), "correct-password".to_string())]
+                    .into_iter()
+                    .collect(),
+            ))),
+            bearer: None,
+            require_auth: true,
+            realm: "schema-registry".into(),
+            forward_secret: None,
+        };
+        let authz = Arc::new(SchemaRegistryAuthz::with_audit(
+            HashSet::new(),
+            true,
+            audit.clone(),
+        ));
+        let app = Router::new()
+            .route("/subjects/{subject}/versions", post(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(
+                authz.clone(),
+                authz_layer,
+            ))
+            .layer(axum::middleware::from_fn_with_state(
+                Arc::new(auth),
+                crate::auth::auth_layer,
+            ));
+        let basic = |password: &str| {
+            format!(
+                "Basic {}",
+                base64::engine::general_purpose::STANDARD.encode(format!("alice:{password}"))
+            )
+        };
+        let bad_basic = basic("password-must-not-leak");
+        let good_basic = basic("correct-password");
+        let bearer = "Bearer bearer-token-must-not-leak";
+        let unknown = "Digest unsupported-credential-must-not-leak";
+        let mut emitted = Vec::new();
+
+        for (authorization, expected) in [
+            (bad_basic.as_str(), StatusCode::UNAUTHORIZED),
+            (bearer, StatusCode::UNAUTHORIZED),
+            (unknown, StatusCode::UNAUTHORIZED),
+            (good_basic.as_str(), StatusCode::FORBIDDEN),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/subjects/private/versions")
+                        .header(header::AUTHORIZATION, authorization)
+                        .extension(ConnectInfo("10.0.0.1:1234".parse::<SocketAddr>().unwrap()))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert2::assert!(response.status() == expected);
+            emitted.push(events.try_recv().expect("one audit event"));
+            assert2::assert!(events.try_recv().is_err());
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/subjects/private/versions")
+                    .header(header::AUTHORIZATION, &good_basic)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert2::assert!(response.status() == StatusCode::FORBIDDEN);
+        emitted.push(events.try_recv().expect("one audit event"));
+        assert2::assert!(events.try_recv().is_err());
+        authz.cache.store(Arc::new(AclCache::new(vec![AclEntry {
+            resource_type: ResourceType::Topic,
+            resource_name: "private".into(),
+            pattern_type: PatternType::Literal,
+            principal: "User:alice".into(),
+            host: "*".into(),
+            operation: AclOperation::Write,
+            permission_type: PermissionType::Allow,
+        }])));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/subjects/private/versions")
+                    .header(header::AUTHORIZATION, &good_basic)
+                    .extension(ConnectInfo("10.0.0.1:1234".parse::<SocketAddr>().unwrap()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert2::assert!(response.status() == StatusCode::OK);
+        emitted.push(events.try_recv().expect("one audit event"));
+        assert2::assert!(events.try_recv().is_err());
+
+        let sink = MemorySink::default();
+        let product = ProductInfo {
+            vendor_name: "Krabka".into(),
+            name: "Schema Registry".into(),
+            version: env!("CARGO_PKG_VERSION").into(),
+        };
+        for event in &emitted {
+            sink.write(AuditRecord::from_event(event, &product))
+                .await
+                .unwrap();
+        }
+        let records = sink.records();
+        assert2::assert!(records.len() == 6);
+        let bodies = records
+            .iter()
+            .map(|record| serde_json::from_slice::<serde_json::Value>(&record.value).unwrap())
+            .collect::<Vec<_>>();
+        assert2::assert!(bodies[0]["status_id"] == 2);
+        assert2::assert!(bodies[0]["auth_protocol"] == "basic");
+        assert2::assert!(bodies[0]["actor"]["user"]["name"] == "alice");
+        assert2::assert!(bodies[0]["src_endpoint"]["ip"] == "10.0.0.1");
+        assert2::assert!(
+            bodies[0]["status_detail"] == "POST /subjects/private/versions authentication failed"
+        );
+        assert2::assert!(bodies[1]["auth_protocol"] == "bearer");
+        assert2::assert!(bodies[1]["actor"]["user"]["name"] == "unknown");
+        assert2::assert!(bodies[2]["auth_protocol"] == "unknown");
+        assert2::assert!(bodies[3]["status_id"] == 2);
+        assert2::assert!(bodies[3]["actor"]["user"]["type"] == "basic");
+        assert2::assert!(bodies[3]["operation"] == "POST /subjects/private/versions Write");
+        assert2::assert!(bodies[3]["resources"][0]["type"] == "Topic");
+        assert2::assert!(bodies[3]["resources"][0]["name"] == "private");
+        assert2::assert!(bodies[4]["src_endpoint"]["ip"] == "unknown");
+        assert2::assert!(bodies[5]["status_id"] == 1);
+        assert2::assert!(bodies[5]["api"]["operation"] == "POST /subjects/private/versions Write");
+        let bodies = serde_json::to_string(&bodies).unwrap();
+        for secret in [
+            "password-must-not-leak",
+            "correct-password",
+            "bearer-token-must-not-leak",
+            "unsupported-credential-must-not-leak",
+            bad_basic.as_str(),
+            good_basic.as_str(),
+            bearer,
+            unknown,
+        ] {
+            assert2::assert!(!bodies.contains(secret));
         }
     }
 }

@@ -2,7 +2,7 @@
 //! the named version.
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, State},
     response::Response,
 };
 use serde::Deserialize;
@@ -11,7 +11,10 @@ use crate::{
     compat,
     error::SrError,
     format::SchemaType,
-    rest::{AppState, parse_optional_version as parse_version, response::ok_json},
+    rest::{
+        AppState, Query, deserialize_bool, parse_optional_version as parse_version,
+        response::ok_json,
+    },
 };
 
 #[derive(Deserialize)]
@@ -25,7 +28,7 @@ struct Body {
 
 #[derive(Deserialize, Default)]
 pub struct VerboseQ {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_bool")]
     verbose: bool,
 }
 
