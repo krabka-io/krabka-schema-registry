@@ -56,6 +56,13 @@ exceptions = [
     # FSF Free/Libre). Pulled in transitively via the vendored `sspi` crate's
     # `network_client` feature, which we need for KDC communication.
     { allow = ["Unlicense"], crate = "portpicker" },
+    # Creusot's specification attributes/proc macros are LGPL-2.1-or-later.
+    # They enter the graph only through krabka-broker's verified kernels
+    # (`krabka-verified`) and throttle arithmetic contracts; ordinary cargo
+    # builds use Creusot's dummy macro implementation, so keep this allowance
+    # crate-scoped rather than allowing LGPL globally.
+    { allow = ["LGPL-2.1-or-later"], crate = "creusot-std" },
+    { allow = ["LGPL-2.1-or-later"], crate = "creusot-std-proc" },
 ]
 confidence-threshold = 0.93
 
@@ -74,6 +81,8 @@ allow-git = [
     "https://github.com/krabka-io/krabka-broker",
     "https://github.com/krabka-io/krabka-client-rs",
     "https://github.com/krabka-io/krabka-protocol",
+    # krabka-security pins unreleased GSSAPI fixes from this fork.
+    "https://github.com/robot-head/sspi-rs",
 ]
 
 [[licenses.clarify]]
