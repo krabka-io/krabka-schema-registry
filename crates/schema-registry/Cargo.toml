@@ -40,10 +40,10 @@ krabka-client-admin = { version = "0.4.0" }
 krabka-client-producer = { version = "0.4.0" }
 krabka-protocol = { version = "0.4.0", default-features = false }
 krabka-security = { version = "0.4.0" }
-krabka-authz = { version = "0.4.0" }
-krabka-audit = { version = "0.4.0" }
+krabka-authz = { version = "0.5.4" }
+krabka-audit = { version = "0.5.4" }
 krabka-metadata = { version = "0.4.0" }
-krabka-telemetry = { version = "0.4.0" }
+krabka-telemetry = { version = "0.5.4" }
 krabka-units = { workspace = true }
 krabka-schema-serde = { workspace = true, features = ["avro", "json", "protobuf"] }
 arc-swap = { workspace = true }
@@ -81,7 +81,7 @@ regex.workspace = true
 tikv-jemallocator = { version = "0.7", optional = true, features = ["profiling", "unprefixed_malloc_on_supported_platforms"] }
 
 [dev-dependencies]
-krabka-broker = { version = "0.4.0" }
+krabka-broker = { version = "0.5.4" }
 prost = { workspace = true }
 ring = { workspace = true }
 schemars = { workspace = true }

@@ -405,9 +405,11 @@ async fn start_mtls_node(bootstrap: &str, tls: TlsConfig, forward_http: reqwest:
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn single_node_enforces_authn_and_authz() {
     let dir = tempfile::tempdir().unwrap();
-    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
-        .await
-        .unwrap();
+    let mut config = BrokerConfig::for_tests(dir.path().to_path_buf());
+    config.authorizer = Arc::new(krabka_broker::authorizer::SimpleAclAuthorizer::new(
+        HashSet::from(["ANONYMOUS".to_string()]),
+    ));
+    let broker = Broker::start(config).await.unwrap();
     let bootstrap = broker.listen_addr().to_string();
     seed_acls(&bootstrap).await;
 
@@ -499,9 +501,11 @@ async fn single_node_enforces_authn_and_authz() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn plaintext_listener_enforces_host_scoped_deny() {
     let dir = tempfile::tempdir().unwrap();
-    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
-        .await
-        .unwrap();
+    let mut config = BrokerConfig::for_tests(dir.path().to_path_buf());
+    config.authorizer = Arc::new(krabka_broker::authorizer::SimpleAclAuthorizer::new(
+        HashSet::from(["ANONYMOUS".to_string()]),
+    ));
+    let broker = Broker::start(config).await.unwrap();
     let bootstrap = broker.listen_addr().to_string();
     seed_acls(&bootstrap).await;
 
@@ -549,9 +553,11 @@ async fn https_round_trip_enforces_auth_over_tls() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let dir = tempfile::tempdir().unwrap();
-    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
-        .await
-        .unwrap();
+    let mut config = BrokerConfig::for_tests(dir.path().to_path_buf());
+    config.authorizer = Arc::new(krabka_broker::authorizer::SimpleAclAuthorizer::new(
+        HashSet::from(["ANONYMOUS".to_string()]),
+    ));
+    let broker = Broker::start(config).await.unwrap();
     let bootstrap = broker.listen_addr().to_string();
     seed_acls(&bootstrap).await;
 
@@ -654,9 +660,11 @@ async fn mtls_two_nodes_authorize_then_forward_to_primary() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let dir = tempfile::tempdir().unwrap();
-    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
-        .await
-        .unwrap();
+    let mut config = BrokerConfig::for_tests(dir.path().to_path_buf());
+    config.authorizer = Arc::new(krabka_broker::authorizer::SimpleAclAuthorizer::new(
+        HashSet::from(["ANONYMOUS".to_string()]),
+    ));
+    let broker = Broker::start(config).await.unwrap();
     let bootstrap = broker.listen_addr().to_string();
     seed_acls_for(&bootstrap, "User:CN=alice").await;
 
@@ -714,9 +722,11 @@ async fn mtls_two_nodes_authorize_then_forward_to_primary() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn two_nodes_authorize_then_forward_to_primary() {
     let dir = tempfile::tempdir().unwrap();
-    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
-        .await
-        .unwrap();
+    let mut config = BrokerConfig::for_tests(dir.path().to_path_buf());
+    config.authorizer = Arc::new(krabka_broker::authorizer::SimpleAclAuthorizer::new(
+        HashSet::from(["ANONYMOUS".to_string()]),
+    ));
+    let broker = Broker::start(config).await.unwrap();
     let bootstrap = broker.listen_addr().to_string();
     seed_acls(&bootstrap).await;
 

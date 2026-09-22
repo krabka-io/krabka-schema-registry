@@ -485,13 +485,13 @@ async fn main() -> anyhow::Result<()> {
             let admin = AdminClient::connect_with_options(
                 &split_bootstrap(&cfg.bootstrap),
                 krabka_client_core::ConnectionOptions {
-                    dns_timeout: krabka_client_core::ClientDnsTimeout::default(),
-                    connect_timeout: secs(5),
+                    socket_connection_setup_timeout: secs(5),
                     request_timeout: secs(30),
                     client_id: "krabka-operator".to_owned(),
                     dispatch_queue_capacity: cfg.runtime.client_dispatch_queue_capacity,
                     frame_max: cfg.runtime.client_frame_max,
                     security: cfg.security.client.clone().map(Box::new),
+                    ..krabka_client_core::ConnectionOptions::default()
                 },
             )
             .await?;

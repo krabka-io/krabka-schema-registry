@@ -936,7 +936,7 @@ mod tests {
             version: env!("CARGO_PKG_VERSION").into(),
         };
         for event in &emitted {
-            sink.write(AuditRecord::from_event(event, &product))
+            sink.write(AuditRecord::from_event(event, &product), true)
                 .await
                 .unwrap();
         }
