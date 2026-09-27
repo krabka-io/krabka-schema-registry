@@ -278,6 +278,8 @@ fn acl_entry_from_admin(e: krabka_client_admin::AclEntry) -> krabka_metadata::Ac
         AO::AlterConfigs => MAO::AlterConfigs,
         AO::IdempotentWrite => MAO::IdempotentWrite,
         AO::TwoPhaseCommit => MAO::TwoPhaseCommit,
+        AO::CreateTokens => MAO::CreateTokens,
+        AO::DescribeTokens => MAO::DescribeTokens,
     };
     let permission_type = match e.permission_type {
         Perm::Allow => MPerm::Allow,
