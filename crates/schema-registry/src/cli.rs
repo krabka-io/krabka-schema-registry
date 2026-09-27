@@ -397,11 +397,13 @@ fn build_sasl(input: &SecurityCliInput) -> anyhow::Result<SaslCredentials> {
                     mechanism: SaslMechanism::ScramSha256,
                     username,
                     password,
+                    delegation_token: false,
                 }),
                 "SCRAM-SHA-512" => Ok(SaslCredentials::Scram {
                     mechanism: SaslMechanism::ScramSha512,
                     username,
                     password,
+                    delegation_token: false,
                 }),
                 other => anyhow::bail!(
                     "invalid --kafka-sasl-mechanism: {other} \

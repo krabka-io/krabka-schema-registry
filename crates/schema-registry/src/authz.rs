@@ -278,6 +278,8 @@ fn acl_entry_from_admin(e: krabka_client_admin::AclEntry) -> krabka_metadata::Ac
         AO::AlterConfigs => MAO::AlterConfigs,
         AO::IdempotentWrite => MAO::IdempotentWrite,
         AO::TwoPhaseCommit => MAO::TwoPhaseCommit,
+        AO::CreateTokens => MAO::CreateTokens,
+        AO::DescribeTokens => MAO::DescribeTokens,
     };
     let permission_type = match e.permission_type {
         Perm::Allow => MPerm::Allow,
@@ -427,6 +429,45 @@ mod tests {
                 permission_type: krabka_metadata::PermissionType::Allow,
             }
         );
+    }
+
+    #[test]
+    fn acl_entry_from_admin_maps_the_kip_373_token_operations() {
+        // KIP-373: CreateTokens and DescribeTokens reach the authorizer as the
+        // same operations, so a token grant read back from the cluster keeps
+        // its meaning.
+        for (admin_op, meta_op) in [
+            (
+                krabka_client_admin::AclOperation::CreateTokens,
+                krabka_metadata::AclOperation::CreateTokens,
+            ),
+            (
+                krabka_client_admin::AclOperation::DescribeTokens,
+                krabka_metadata::AclOperation::DescribeTokens,
+            ),
+        ] {
+            let admin = krabka_client_admin::AclEntry {
+                resource_type: krabka_client_admin::ResourceType::Cluster,
+                resource_name: "kafka-cluster".into(),
+                pattern_type: krabka_client_admin::PatternType::Literal,
+                principal: "User:alice".into(),
+                host: "*".into(),
+                operation: admin_op,
+                permission_type: krabka_client_admin::PermissionType::Allow,
+            };
+            assert2::assert!(
+                acl_entry_from_admin(admin)
+                    == krabka_metadata::AclEntry {
+                        resource_type: krabka_metadata::ResourceType::Cluster,
+                        resource_name: "kafka-cluster".to_string(),
+                        pattern_type: krabka_metadata::PatternType::Literal,
+                        principal: "User:alice".to_string(),
+                        host: "*".to_string(),
+                        operation: meta_op,
+                        permission_type: krabka_metadata::PermissionType::Allow,
+                    }
+            );
+        }
     }
 
     use AclOperation::{Alter, Delete, Describe, Read, Write};
