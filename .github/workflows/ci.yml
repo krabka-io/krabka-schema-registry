@@ -75,8 +75,8 @@ jobs:
 
       - name: enforce Cargo lint and supply-chain policy
         run: |
-          rustup toolchain install 1.97.1 --profile minimal --component clippy
-          cargo +1.97.1 clippy --workspace --all-targets -- -D warnings
+          rustup toolchain install 1.98.1 --profile minimal --component clippy
+          cargo +1.98.1 clippy --workspace --all-targets -- -D warnings
           cargo install cargo-deny --locked --version 0.20.2
           cargo deny check
 
