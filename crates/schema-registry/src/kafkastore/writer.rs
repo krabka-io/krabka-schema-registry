@@ -79,7 +79,9 @@ impl SchemaWriter {
     ) -> anyhow::Result<i64> {
         tokio::time::timeout(self.timeout, async {
             if let Some(group) = group {
-                return self.produce_fenced(key, Some(value), group).await;
+                // Boxed: the transactional producer's futures are large, and
+                // every caller of this one would otherwise carry them inline.
+                return Box::pin(self.produce_fenced(key, Some(value), group)).await;
             }
             self.produce_unfenced(key, Some(value)).await
         })
@@ -138,15 +140,15 @@ impl SchemaWriter {
     }
 
     async fn produce_unfenced(&self, key: Vec<u8>, value: Option<Vec<u8>>) -> anyhow::Result<i64> {
-        let rx = self
-            .producer
-            .send(ProducerRecord {
-                topic: self.topic.clone(),
-                key: Some(Bytes::from(key)),
-                value: value.map(Bytes::from),
-                ..Default::default()
-            })
-            .await;
+        // Boxed for the same reason as the transactional path: the producer's
+        // send future is large.
+        let rx = Box::pin(self.producer.send(ProducerRecord {
+            topic: self.topic.clone(),
+            key: Some(Bytes::from(key)),
+            value: value.map(Bytes::from),
+            ..Default::default()
+        }))
+        .await;
         let meta = rx
             .await
             .map_err(|_| anyhow::anyhow!("producer dropped ack"))??;
@@ -212,7 +214,7 @@ impl SchemaWriter {
     ) -> anyhow::Result<i64> {
         tokio::time::timeout(self.timeout, async {
             if let Some(group) = group {
-                self.produce_fenced(key, None, group).await
+                Box::pin(self.produce_fenced(key, None, group)).await
             } else {
                 self.produce_unfenced(key, None).await
             }
