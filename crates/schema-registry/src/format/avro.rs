@@ -2,7 +2,7 @@
 //! module also runs the directional compatibility check through
 //! [`apache_avro::schema_compatibility::SchemaCompatibility`].
 
-use apache_avro::schema_compatibility::SchemaCompatibility;
+use apache_avro::schema_compatibility::{Compatibility, SchemaCompatibility};
 
 use super::ParsedSchema;
 use crate::error::SrError;
@@ -71,7 +71,16 @@ pub fn check(
     let writer_schema = parse(&writer, writer_refs)
         .map_err(|e| vec![format!("writer: {e}")])?
         .parsed;
-    SchemaCompatibility::can_read(&writer_schema, &reader_schema).map_err(|e| vec![e.to_string()])
+    match SchemaCompatibility::can_read(&writer_schema, &reader_schema) {
+        Ok(Compatibility::Full) => Ok(()),
+        // Some writer data resolves and some does not: an enum symbol the
+        // reader lacks, or a union branch it cannot take. Confluent rejects
+        // the pair.
+        Ok(Compatibility::Partial) => Err(vec![
+            "reader resolves only part of what the writer can produce".to_owned(),
+        ]),
+        Err(e) => Err(vec![e.to_string()]),
+    }
 }
 
 fn erase_logical_types(value: &mut serde_json::Value) {

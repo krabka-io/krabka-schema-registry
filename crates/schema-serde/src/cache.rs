@@ -633,7 +633,6 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use assert2::check;
-    use krabka_units::prelude::*;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{body_json, method, path},

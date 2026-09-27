@@ -116,9 +116,11 @@ pub fn validate_avro(schema: &str, body: &[u8]) -> Result<(), SchemaSerdeError> 
     let mut cursor = body;
     // Reader schema `None`: decode against the writer schema alone. There is
     // no reader type here, so no resolution is wanted.
-    apache_avro::from_avro_datum(&parsed, &mut cursor, None)
+    apache_avro::reader::datum::GenericDatumReader::builder(&parsed)
+        .build()
+        .and_then(|reader| reader.read_value(&mut cursor))
         .map_err(|e| SchemaSerdeError::Deserialize(format!("avro body: {e}")))?;
-    // `from_avro_datum` reads one datum and stops. Bytes after it are not part
+    // `read_value` reads one datum and stops. Bytes after it are not part
     // of any datum this schema describes, so the body is not an instance of it.
     if cursor.is_empty() {
         Ok(())
@@ -332,7 +334,11 @@ mod tests {
             ("id".to_owned(), Value::String("a".to_owned())),
             ("total".to_owned(), Value::Double(1.0)),
         ]);
-        apache_avro::to_avro_datum(&schema, record).unwrap()
+        apache_avro::writer::datum::GenericDatumWriter::builder(&schema)
+            .build()
+            .unwrap()
+            .write_value_to_vec(record)
+            .unwrap()
     }
 
     #[cfg(feature = "avro")]
