@@ -6,7 +6,11 @@
 use std::{marker::PhantomData, sync::Arc};
 
 use apache_avro::{
-    AvroSchema, from_avro_datum_schemata, from_value, schema::Schema, to_avro_datum, to_value,
+    AvroSchema, from_value,
+    reader::datum::{GenericDatumReader, GenericDatumReaderBuilder},
+    schema::Schema,
+    to_value,
+    writer::datum::GenericDatumWriter,
 };
 use bytes::Bytes;
 use serde::{Serialize, de::DeserializeOwned};
@@ -102,7 +106,9 @@ where
     fn serialize(&self, topic: &str, value: &T) -> Result<Bytes, SchemaSerdeError> {
         let id = self.binding.id(topic)?;
         let avro_value = to_value(value).map_err(|e| SchemaSerdeError::Serialize(e.to_string()))?;
-        let body = to_avro_datum(&self.reader_schema, avro_value)
+        let body = GenericDatumWriter::builder(&self.reader_schema)
+            .build()
+            .and_then(|writer| writer.write_value_to_vec(avro_value))
             .map_err(|e| SchemaSerdeError::Serialize(e.to_string()))?;
         Ok(wire::encode(id, &body))
     }
@@ -128,13 +134,12 @@ where
             .ok_or_else(|| SchemaSerdeError::Schema("empty Avro schema set".into()))?;
         let writer_schemata = schemas.iter().collect();
         let mut cursor = body;
-        let value = from_avro_datum_schemata(
-            writer_schema,
-            writer_schemata,
-            &mut cursor,
-            Some(&self.reader_schema),
-        )
-        .map_err(|e| SchemaSerdeError::Deserialize(e.to_string()))?;
+        let value = GenericDatumReader::builder(writer_schema)
+            .writer_schemata(writer_schemata)
+            .map(|builder| builder.reader_schema(&self.reader_schema))
+            .and_then(GenericDatumReaderBuilder::build)
+            .and_then(|reader| reader.read_value(&mut cursor))
+            .map_err(|e| SchemaSerdeError::Deserialize(e.to_string()))?;
         from_value::<T>(&value).map_err(|e| SchemaSerdeError::Deserialize(e.to_string()))
     }
 }
