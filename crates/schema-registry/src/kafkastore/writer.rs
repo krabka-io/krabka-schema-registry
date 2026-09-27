@@ -130,7 +130,8 @@ impl SchemaWriter {
         tokio::time::timeout(self.timeout, async {
             let mut state = self.fenced_state.lock().await;
             if state.generation_id != Some(group.generation_id) {
-                self.fenced_producer.init_transactions().await?;
+                // Boxed: the transactional producer's futures are large.
+                Box::pin(self.fenced_producer.init_transactions()).await?;
                 state.generation_id = Some(group.generation_id);
             }
             Ok::<(), anyhow::Error>(())
