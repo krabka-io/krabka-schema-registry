@@ -1,3 +1,5 @@
+mod broker_support;
+
 use std::sync::OnceLock;
 
 use apache_avro::AvroSchema;
@@ -70,6 +72,7 @@ async fn all_formats_round_trip_through_in_process_registry() {
     let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
         .await
         .unwrap();
+    broker_support::wait_until_coordinators_ready(&broker).await;
     let cancel = CancellationToken::new();
     let config = RegistryConfig {
         bootstrap: broker.listen_addr().to_string(),

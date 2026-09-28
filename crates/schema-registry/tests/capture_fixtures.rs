@@ -54,6 +54,7 @@ const ADVERTISED: &str = "host.docker.internal:9092";
 /// `host.docker.internal` address, which a host process cannot resolve.
 const DIRECT_ADDR: &str = "127.0.0.1:9092";
 
+mod broker_support;
 mod docker_support;
 use docker_support::SR_IMAGE;
 
@@ -105,8 +106,10 @@ async fn start_host_broker() -> (krabka_broker::BrokerHandle, tempfile::TempDir)
         controller_heartbeat_interval: millis(500),
         bootstrap_mode: krabka_broker::BootstrapMode::Bootstrap,
         ..BrokerConfig::default()
-    };
+    }
+    .with_internal_topics_for(1);
     let handle = Broker::start(config).await.expect("start broker");
+    broker_support::wait_until_coordinators_ready(&handle).await;
     eprintln!("CAPTURE broker started listen={LISTEN} advertised={ADVERTISED}");
     (handle, dir)
 }
