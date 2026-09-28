@@ -198,7 +198,10 @@ impl SchemaRegistryAuthz {
                 .await
             {
                 Ok(entries) => {
-                    let entries = entries.into_iter().map(acl_entry_from_admin).collect();
+                    let entries = entries
+                        .into_iter()
+                        .filter_map(acl_entry_from_admin)
+                        .collect();
                     self.cache.store(Arc::new(AclCache::new(entries)));
                 }
                 Err(e) => tracing::warn!(error = %e, "ACL refresh failed; keeping prior snapshot"),
@@ -246,7 +249,11 @@ impl SchemaRegistryAuthz {
 /// The admin crate keeps a structurally identical local copy, with the same
 /// field names and enum variants, to avoid a broker dependency. This function
 /// maps between them.
-fn acl_entry_from_admin(e: krabka_client_admin::AclEntry) -> krabka_metadata::AclEntry {
+///
+/// Returns `None` for a `MATCH` pattern, which is a filter value only. The
+/// admin client never decodes a stored ACL as `MATCH`, as Kafka's
+/// `ResourcePattern` refuses it, so no real entry is dropped.
+fn acl_entry_from_admin(e: krabka_client_admin::AclEntry) -> Option<krabka_metadata::AclEntry> {
     use krabka_client_admin::{
         AclOperation as AO, PatternType as PT, PermissionType as Perm, ResourceType as RT,
     };
@@ -260,10 +267,13 @@ fn acl_entry_from_admin(e: krabka_client_admin::AclEntry) -> krabka_metadata::Ac
         RT::Group => MRT::Group,
         RT::Cluster => MRT::Cluster,
         RT::TransactionalId => MRT::TransactionalId,
+        RT::DelegationToken => MRT::DelegationToken,
+        RT::User => MRT::User,
     };
     let pattern_type = match e.pattern_type {
         PT::Literal => MPT::Literal,
         PT::Prefixed => MPT::Prefixed,
+        PT::Match => return None,
     };
     let operation = match e.operation {
         AO::All => MAO::All,
@@ -286,7 +296,7 @@ fn acl_entry_from_admin(e: krabka_client_admin::AclEntry) -> krabka_metadata::Ac
         Perm::Deny => MPerm::Deny,
     };
 
-    ME {
+    Some(ME {
         resource_type,
         resource_name: e.resource_name,
         pattern_type,
@@ -294,7 +304,7 @@ fn acl_entry_from_admin(e: krabka_client_admin::AclEntry) -> krabka_metadata::Ac
         host: e.host,
         operation,
         permission_type,
-    }
+    })
 }
 
 /// `from_fn_with_state` middleware that gates each request.
@@ -419,7 +429,7 @@ mod tests {
         };
         let meta = acl_entry_from_admin(admin);
         assert2::assert!(
-            meta == krabka_metadata::AclEntry {
+            meta == Some(krabka_metadata::AclEntry {
                 resource_type: krabka_metadata::ResourceType::TransactionalId,
                 resource_name: "my-txn".to_string(),
                 pattern_type: krabka_metadata::PatternType::Literal,
@@ -427,7 +437,7 @@ mod tests {
                 host: "*".to_string(),
                 operation: krabka_metadata::AclOperation::TwoPhaseCommit,
                 permission_type: krabka_metadata::PermissionType::Allow,
-            }
+            })
         );
     }
 
@@ -457,7 +467,7 @@ mod tests {
             };
             assert2::assert!(
                 acl_entry_from_admin(admin)
-                    == krabka_metadata::AclEntry {
+                    == Some(krabka_metadata::AclEntry {
                         resource_type: krabka_metadata::ResourceType::Cluster,
                         resource_name: "kafka-cluster".to_string(),
                         pattern_type: krabka_metadata::PatternType::Literal,
@@ -465,8 +475,45 @@ mod tests {
                         host: "*".to_string(),
                         operation: meta_op,
                         permission_type: krabka_metadata::PermissionType::Allow,
-                    }
+                    })
             );
+        }
+    }
+
+    #[test]
+    fn acl_entry_from_admin_maps_every_resource_and_pattern_type() {
+        // Kafka 4.3.1's ResourceType and PatternType: DELEGATION_TOKEN and USER
+        // map across, and MATCH, a filter value only, is no stored entry.
+        use krabka_client_admin::{PatternType as PT, ResourceType as RT};
+        use krabka_metadata::{PatternType as MPT, ResourceType as MRT};
+        for (resource_type, pattern_type, want) in [
+            (
+                RT::DelegationToken,
+                PT::Literal,
+                Some((MRT::DelegationToken, MPT::Literal)),
+            ),
+            (RT::User, PT::Prefixed, Some((MRT::User, MPT::Prefixed))),
+            (RT::Topic, PT::Match, None),
+        ] {
+            let admin = krabka_client_admin::AclEntry {
+                resource_type,
+                resource_name: "alice".into(),
+                pattern_type,
+                principal: "User:alice".into(),
+                host: "*".into(),
+                operation: krabka_client_admin::AclOperation::Describe,
+                permission_type: krabka_client_admin::PermissionType::Allow,
+            };
+            let want = want.map(|(resource_type, pattern_type)| krabka_metadata::AclEntry {
+                resource_type,
+                resource_name: "alice".to_string(),
+                pattern_type,
+                principal: "User:alice".to_string(),
+                host: "*".to_string(),
+                operation: krabka_metadata::AclOperation::Describe,
+                permission_type: krabka_metadata::PermissionType::Allow,
+            });
+            assert2::assert!(acl_entry_from_admin(admin) == want);
         }
     }
 

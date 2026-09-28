@@ -158,12 +158,14 @@ async fn startup_rejects_invalid_schema_topic_layout() {
                     partitions: 2,
                     replicas: 1,
                     configs: BTreeMap::from([("cleanup.policy".into(), "compact".into())]),
+                    replica_assignments: BTreeMap::new(),
                 },
                 CreateTopicSpec {
                     name: "_schemas-delete".into(),
                     partitions: 1,
                     replicas: 1,
                     configs: BTreeMap::from([("cleanup.policy".into(), "delete".into())]),
+                    replica_assignments: BTreeMap::new(),
                 },
             ],
             TopicMutationOptions::with_timeout(krabka_units::secs(10)),
@@ -213,6 +215,7 @@ async fn reader_routes_to_schema_partition_leader() {
                 partitions: 1,
                 replicas: 3,
                 configs: BTreeMap::from([("cleanup.policy".into(), "compact".into())]),
+                replica_assignments: BTreeMap::new(),
             }],
             TopicMutationOptions::with_timeout(krabka_units::secs(10)),
         )
