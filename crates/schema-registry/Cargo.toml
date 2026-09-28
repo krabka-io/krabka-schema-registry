@@ -81,7 +81,11 @@ regex.workspace = true
 tikv-jemallocator = { version = "0.7", optional = true, features = ["profiling", "unprefixed_malloc_on_supported_platforms"] }
 
 [dev-dependencies]
-krabka-broker = { version = "0.6.1" }
+# `test-helpers` exposes `BrokerHandle::wait_until_group_coordinator_ready` and
+# `wait_until_transaction_coordinator_ready`. A broker creates its coordinator
+# topics on first use, and `tests/broker_support` brings them up after every
+# in-process broker start.
+krabka-broker = { version = "0.6.1", features = ["test-helpers"] }
 prost = { workspace = true }
 ring = { workspace = true }
 schemars = { workspace = true }

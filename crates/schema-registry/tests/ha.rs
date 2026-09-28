@@ -1,3 +1,5 @@
+mod broker_support;
+
 use std::{sync::Arc, time::Duration};
 
 use axum::Router;
@@ -53,6 +55,7 @@ async fn single_node_becomes_primary() {
     let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
         .await
         .unwrap();
+    broker_support::wait_until_coordinators_ready(&broker).await;
     let cancel = CancellationToken::new();
     let c = cfg(&broker.listen_addr().to_string(), 8081);
     let mut rx = Election::start(&c, cancel.clone()).await.unwrap();
@@ -142,6 +145,7 @@ async fn multi_node_elects_one_primary_forwards_writes_and_fails_over() {
     let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
         .await
         .unwrap();
+    broker_support::wait_until_coordinators_ready(&broker).await;
     let bootstrap = broker.listen_addr().to_string();
     let mut a = start_node(&bootstrap).await;
     let mut b = start_node(&bootstrap).await;
@@ -262,6 +266,7 @@ async fn cancelled_store_reader_returns_confluent_timeout() {
     let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
         .await
         .unwrap();
+    broker_support::wait_until_coordinators_ready(&broker).await;
     let mut node = start_node(&broker.listen_addr().to_string()).await;
     await_state(&mut node.primary, 20, |state| state.is_primary).await;
     node.store_cancel.cancel();
@@ -290,12 +295,44 @@ async fn cancelled_store_reader_returns_confluent_timeout() {
     broker.shutdown().await;
 }
 
+/// A new cluster has no `__consumer_offsets` or `__transaction_state`. The
+/// election and the first write wait until the broker creates them, as a
+/// Confluent registry does, and do not report `COORDINATOR_NOT_AVAILABLE`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn first_write_on_a_new_cluster_waits_for_the_coordinators() {
+    let dir = tempfile::tempdir().unwrap();
+    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+        .await
+        .unwrap();
+    let mut node = start_node(&broker.listen_addr().to_string()).await;
+    await_state(&mut node.primary, 25, |state| state.is_primary).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://127.0.0.1:{}/subjects/s/versions",
+            node.port
+        ))
+        .header("content-type", "application/vnd.schemaregistry.v1+json")
+        .body(r#"{"schema":"\"string\""}"#)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert2::check!(status == reqwest::StatusCode::OK);
+    assert2::check!(body == serde_json::json!({ "id": 1 }));
+
+    node.cancel.cancel();
+    broker.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn restarting_store_replays_the_complete_snapshot() {
     let dir = tempfile::tempdir().unwrap();
     let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
         .await
         .unwrap();
+    broker_support::wait_until_coordinators_ready(&broker).await;
     let config = cfg(&broker.listen_addr().to_string(), 8084);
     let first_cancel = CancellationToken::new();
     let first = KafkaStore::start(&config, first_cancel.clone())

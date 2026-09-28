@@ -8,6 +8,8 @@
 //! Schema strings and the registration order are taken verbatim from the fixture
 //! README (`tests/fixtures/README.md`) so that assigned IDs 1/2/3 match.
 
+mod broker_support;
+
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -64,6 +66,7 @@ async fn boot_registry() -> (
     let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
         .await
         .unwrap();
+    broker_support::wait_until_coordinators_ready(&broker).await;
     let cfg = RegistryConfig {
         bootstrap: broker.listen_addr().to_string(),
         schemas_topic: "_schemas".into(),

@@ -4,7 +4,10 @@
 
 use std::collections::BTreeMap;
 
-use krabka_client_admin::{AdminClient, AdminError, CreateTopicSpec, TopicMutationOptions};
+use krabka_client_admin::{
+    AdminClient, AdminError, Config, ConfigResource, CreateTopicSpec, DescribeConfigsOptions,
+    DescribeConfigsResults, TopicMutationOptions,
+};
 use krabka_client_core::{ClientError, ClientSecurity};
 use krabka_protocol::primitives::uuid::Uuid as WireUuid;
 use krabka_units::prelude::*;
@@ -39,6 +42,25 @@ fn compact_only(policy: &str) -> bool {
     values.next() == Some("compact") && values.next().is_none()
 }
 
+/// The config of `resource` from a `describe_configs` answer. A resource-level
+/// error becomes the [`AdminError::Broker`] that [`retryable_admin_error`]
+/// classifies, and a resource with no result reads as having no configs.
+fn topic_config(
+    results: &mut DescribeConfigsResults,
+    resource: &ConfigResource,
+) -> Result<Config, AdminError> {
+    match results.remove(resource) {
+        Some(Ok(config)) => Ok(config),
+        Some(Err(error)) => Err(AdminError::Broker {
+            api: "DescribeConfigs",
+            code: error.code,
+            name: error.name,
+            message: error.message,
+        }),
+        None => Ok(Config::default()),
+    }
+}
+
 fn schemas_topic_spec(cfg: &RegistryConfig) -> (CreateTopicSpec, Time) {
     (
         CreateTopicSpec {
@@ -46,6 +68,7 @@ fn schemas_topic_spec(cfg: &RegistryConfig) -> (CreateTopicSpec, Time) {
             partitions: 1,
             replicas: cfg.schemas_topic_rf,
             configs: BTreeMap::from([("cleanup.policy".to_string(), "compact".to_string())]),
+            replica_assignments: BTreeMap::new(),
         },
         cfg.runtime.schemas_topic_create_timeout,
     )
@@ -138,8 +161,16 @@ pub async fn ensure_schemas_topic(
                 entry.partition_count
             );
         }
-        let configs = match admin.describe_configs(&[cfg.schemas_topic.as_str()]).await {
-            Ok(configs) => configs,
+        let resource = ConfigResource::topic(cfg.schemas_topic.as_str());
+        let described = admin
+            .describe_configs(
+                std::slice::from_ref(&resource),
+                DescribeConfigsOptions::default(),
+            )
+            .await
+            .and_then(|mut results| topic_config(&mut results, &resource));
+        let config = match described {
+            Ok(config) => config,
             Err(error)
                 if retryable_admin_error(&error) && tokio::time::Instant::now() < deadline =>
             {
@@ -148,10 +179,10 @@ pub async fn ensure_schemas_topic(
             }
             Err(error) => return Err(error.into()),
         };
-        let cleanup_policy = configs
-            .into_iter()
-            .find(|config| config.topic == cfg.schemas_topic)
-            .and_then(|config| config.overrides.get("cleanup.policy").cloned());
+        let cleanup_policy = config
+            .dynamic_overrides(&resource)
+            .get("cleanup.policy")
+            .cloned();
         if !cleanup_policy.as_deref().is_some_and(compact_only) {
             anyhow::bail!(
                 "{} cleanup.policy must be compact only; observed {}",
@@ -171,9 +202,13 @@ fn to_wire_uuid(id: uuid::Uuid) -> WireUuid {
 
 #[cfg(test)]
 mod tests {
+    use krabka_client_admin::{AdminError, Config, ConfigResource, KafkaError};
     use krabka_units::prelude::*;
 
-    use super::{compact_only, schemas_topic_spec, to_wire_uuid, transient_topic_error};
+    use super::{
+        compact_only, retryable_admin_error, schemas_topic_spec, to_wire_uuid, topic_config,
+        transient_topic_error,
+    };
     use crate::config::{RegistryConfig, RegistryRuntimeConfig, SecurityConfig};
 
     #[test]
@@ -203,6 +238,51 @@ mod tests {
         assert2::check!(wire.0 == *u.as_bytes());
     }
 
+    #[test]
+    fn topic_config_turns_a_resource_error_into_a_retryable_broker_error() {
+        let resource = ConfigResource::topic("_schemas");
+        let error = |code, name| KafkaError {
+            code,
+            name,
+            message: Some("not yet".into()),
+        };
+        for (case, answer, want_config, want_retryable) in [
+            ("a config", Some(Ok(Config::default())), true, false),
+            ("no result", None, true, false),
+            (
+                "UNKNOWN_TOPIC_OR_PARTITION",
+                Some(Err(error(3, "UNKNOWN_TOPIC_OR_PARTITION"))),
+                false,
+                true,
+            ),
+            (
+                "TOPIC_AUTHORIZATION_FAILED",
+                Some(Err(error(29, "TOPIC_AUTHORIZATION_FAILED"))),
+                false,
+                false,
+            ),
+        ] {
+            let mut results = answer
+                .map(|answer| (resource.clone(), answer))
+                .into_iter()
+                .collect();
+            let got = topic_config(&mut results, &resource);
+            assert2::check!(got.is_ok() == want_config, "{case}");
+            if let Err(error) = &got {
+                assert2::check!(
+                    matches!(
+                        error,
+                        AdminError::Broker {
+                            api: "DescribeConfigs",
+                            ..
+                        }
+                    ),
+                    "{case}"
+                );
+                assert2::check!(retryable_admin_error(error) == want_retryable, "{case}");
+            }
+        }
+    }
     #[test]
     fn topic_policy_validation_is_strict_and_transient_codes_are_named() {
         assert2::check!(compact_only("compact"));

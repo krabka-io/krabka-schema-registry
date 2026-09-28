@@ -38,6 +38,7 @@ const LISTEN: &str = "0.0.0.0:9092";
 const CONTROLLER_LISTEN: &str = "0.0.0.0:9093";
 const ADVERTISED: &str = "host.docker.internal:9092";
 
+mod broker_support;
 mod docker_support;
 use docker_support::SR_IMAGE;
 const SR_CONTENT_TYPE: &str = "application/vnd.schemaregistry.v1+json";
@@ -87,8 +88,10 @@ async fn start_host_broker() -> (krabka_broker::BrokerHandle, tempfile::TempDir)
         controller_heartbeat_interval: millis(500),
         bootstrap_mode: krabka_broker::BootstrapMode::Bootstrap,
         ..BrokerConfig::default()
-    };
+    }
+    .with_internal_topics_for(1);
     let handle = Broker::start(config).await.expect("start broker");
+    broker_support::wait_until_coordinators_ready(&handle).await;
     eprintln!("CAPTURE broker started listen={LISTEN} advertised={ADVERTISED}");
     (handle, dir)
 }

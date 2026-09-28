@@ -29,6 +29,7 @@ use krabka_schema_registry::{
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
+mod broker_support;
 mod docker_support;
 mod interop_support;
 use interop_support::{

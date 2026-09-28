@@ -18,6 +18,8 @@
 //! `run_acl_refresh` timer. The authorized assertions therefore poll to a
 //! deadline instead of a single assertion.
 
+mod broker_support;
+
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -410,6 +412,7 @@ async fn single_node_enforces_authn_and_authz() {
         HashSet::from(["ANONYMOUS".to_string()]),
     ));
     let broker = Broker::start(config).await.unwrap();
+    broker_support::wait_until_coordinators_ready(&broker).await;
     let bootstrap = broker.listen_addr().to_string();
     seed_acls(&bootstrap).await;
 
@@ -506,6 +509,7 @@ async fn plaintext_listener_enforces_host_scoped_deny() {
         HashSet::from(["ANONYMOUS".to_string()]),
     ));
     let broker = Broker::start(config).await.unwrap();
+    broker_support::wait_until_coordinators_ready(&broker).await;
     let bootstrap = broker.listen_addr().to_string();
     seed_acls(&bootstrap).await;
 
@@ -558,6 +562,7 @@ async fn https_round_trip_enforces_auth_over_tls() {
         HashSet::from(["ANONYMOUS".to_string()]),
     ));
     let broker = Broker::start(config).await.unwrap();
+    broker_support::wait_until_coordinators_ready(&broker).await;
     let bootstrap = broker.listen_addr().to_string();
     seed_acls(&bootstrap).await;
 
@@ -665,6 +670,7 @@ async fn mtls_two_nodes_authorize_then_forward_to_primary() {
         HashSet::from(["ANONYMOUS".to_string()]),
     ));
     let broker = Broker::start(config).await.unwrap();
+    broker_support::wait_until_coordinators_ready(&broker).await;
     let bootstrap = broker.listen_addr().to_string();
     seed_acls_for(&bootstrap, "User:CN=alice").await;
 
@@ -727,6 +733,7 @@ async fn two_nodes_authorize_then_forward_to_primary() {
         HashSet::from(["ANONYMOUS".to_string()]),
     ));
     let broker = Broker::start(config).await.unwrap();
+    broker_support::wait_until_coordinators_ready(&broker).await;
     let bootstrap = broker.listen_addr().to_string();
     seed_acls(&bootstrap).await;
 
@@ -955,6 +962,7 @@ async fn jwks_bearer_valid_signed_token_returns_200() {
     let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
         .await
         .unwrap();
+    broker_support::wait_until_coordinators_ready(&broker).await;
     let bootstrap = broker.listen_addr().to_string();
 
     let (token, jwks_json) = mint_rs256_for_test("k1", r#"{"sub":"alice","exp":9999999999}"#);
@@ -984,6 +992,7 @@ async fn jwks_bearer_unsigned_token_returns_401() {
     let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
         .await
         .unwrap();
+    broker_support::wait_until_coordinators_ready(&broker).await;
     let bootstrap = broker.listen_addr().to_string();
 
     let (_token, jwks_json) = mint_rs256_for_test("k1", r#"{"sub":"alice","exp":9999999999}"#);
@@ -1018,6 +1027,7 @@ async fn jwks_bearer_wrong_issuer_returns_401() {
     let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
         .await
         .unwrap();
+    broker_support::wait_until_coordinators_ready(&broker).await;
     let bootstrap = broker.listen_addr().to_string();
 
     let (token, jwks_json) = mint_rs256_for_test(

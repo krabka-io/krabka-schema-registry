@@ -39,8 +39,10 @@ pub async fn start_host_broker() -> (krabka_broker::BrokerHandle, tempfile::Temp
         controller_heartbeat_interval: millis(500),
         bootstrap_mode: krabka_broker::BootstrapMode::Bootstrap,
         ..BrokerConfig::default()
-    };
+    }
+    .with_internal_topics_for(1);
     let handle = Broker::start(config).await.expect("start broker");
+    crate::broker_support::wait_until_coordinators_ready(&handle).await;
     (handle, dir)
 }
 
