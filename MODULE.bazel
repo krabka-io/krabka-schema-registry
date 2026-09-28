@@ -185,6 +185,7 @@ SIBLING_MEMBERS = {
     "krabka-audit": "crates/audit",
     "krabka-authz": "crates/authz",
     "krabka-broker": "crates/broker",
+    "krabka-format": "crates/format",
     "krabka-kraft-core": "crates/kraft-core",
     "krabka-log": "crates/log",
     "krabka-logfmt": "crates/logfmt",
