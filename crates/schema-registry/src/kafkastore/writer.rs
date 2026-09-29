@@ -1,13 +1,9 @@
 //! Primary-only writer. It serialises a `_schemas` record and produces it, then
 //! returns the produced offset for read-your-writes gating.
 
-use std::pin::Pin;
-
 use bytes::Bytes;
 use krabka_client_core::ClientSecurity;
-use krabka_client_producer::{
-    Acks, ConsumerGroupMetadata, Producer, ProducerError, ProducerRecord,
-};
+use krabka_client_producer::{Acks, ConsumerGroupMetadata, Producer, ProducerRecord};
 use krabka_units::convert::TimeExt as _;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -134,39 +130,19 @@ impl SchemaWriter {
         tokio::time::timeout(self.timeout, async {
             let mut state = self.fenced_state.lock().await;
             if state.generation_id != Some(group.generation_id) {
-                self.init_transactions().await?;
+                // Boxed: the transactional producer's futures are large.
+                // `init_transactions` blocks through the coordinator errors
+                // Kafka's `initTransactions` retries, such as
+                // COORDINATOR_NOT_AVAILABLE while a new cluster creates
+                // `__transaction_state`. It fails at once on a fatal lookup
+                // answer, which reaches the caller as a backend error.
+                Box::pin(self.fenced_producer.init_transactions()).await?;
                 state.generation_id = Some(group.generation_id);
             }
             Ok::<(), anyhow::Error>(())
         })
         .await
         .map_err(|_| anyhow::Error::new(StoreTimeout))?
-    }
-
-    /// Initialize the transactional producer. After a coordinator error, try
-    /// again until it succeeds. The caller bounds the wait.
-    ///
-    /// A broker creates `__transaction_state` on the first lookup, and answers
-    /// `COORDINATOR_NOT_AVAILABLE` until the topic is loaded. Kafka's
-    /// `KafkaProducer.initTransactions` blocks through that answer, because
-    /// `TransactionManager.FindCoordinatorHandler` sends the lookup again after
-    /// a retriable error. The first write on a new cluster therefore waits for
-    /// the coordinator, as it does in a Confluent registry.
-    async fn init_transactions(&self) -> Result<(), ProducerError> {
-        loop {
-            // Boxed: the transactional producer's futures are large. The
-            // `dyn` also ends the `Send` proof here, so each REST handler
-            // that writes does not prove it again through the whole client.
-            let init: Pin<Box<dyn Future<Output = Result<(), ProducerError>> + Send + '_>> =
-                Box::pin(self.fenced_producer.init_transactions());
-            match init.await {
-                Err(error) if is_coordinator_error(&error) => {
-                    tracing::debug!(%error, "schema-store transaction coordinator is not ready");
-                    tokio::time::sleep(COORDINATOR_RETRY_BACKOFF).await;
-                }
-                result => return result,
-            }
-        }
     }
 
     async fn produce_unfenced(&self, key: Vec<u8>, value: Option<Vec<u8>>) -> anyhow::Result<i64> {
@@ -254,17 +230,6 @@ impl SchemaWriter {
     }
 }
 
-/// The wait before `InitProducerId` goes out again after a coordinator error.
-/// It is the default of Kafka's `retry.backoff.ms`.
-const COORDINATOR_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
-
-/// Tells if `error` is a coordinator error that Kafka's producer retries:
-/// `COORDINATOR_LOAD_IN_PROGRESS` (14), `COORDINATOR_NOT_AVAILABLE` (15) or
-/// `NOT_COORDINATOR` (16).
-const fn is_coordinator_error(error: &ProducerError) -> bool {
-    matches!(error, ProducerError::Server(14..=16))
-}
-
 fn barrier_key(token: Uuid) -> Vec<u8> {
     format!(r#"{{"keytype":"NOOP","magic":0,"barrier":"{token}"}}"#).into_bytes()
 }
@@ -272,22 +237,6 @@ fn barrier_key(token: Uuid) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn only_coordinator_errors_are_retried() {
-        for (error, retried) in [
-            (ProducerError::Server(13), false),
-            (ProducerError::Server(14), true),
-            (ProducerError::Server(15), true),
-            (ProducerError::Server(16), true),
-            (ProducerError::Server(17), false),
-            // TRANSACTIONAL_ID_AUTHORIZATION_FAILED is not a coordinator error.
-            (ProducerError::Server(53), false),
-            (ProducerError::FencedProducer, false),
-        ] {
-            assert2::check!(is_coordinator_error(&error) == retried, "{error}");
-        }
-    }
 
     #[test]
     fn barrier_keys_are_unique_and_tombstoneable() {
