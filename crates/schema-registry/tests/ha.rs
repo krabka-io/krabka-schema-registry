@@ -204,8 +204,6 @@ async fn multi_node_elects_one_primary_forwards_writes_and_fails_over() {
             ..Default::default()
         })
         .await
-        .await
-        .unwrap()
         .unwrap();
     let stale_store = if a_is_primary {
         a.election_cancel.cancel();
