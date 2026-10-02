@@ -148,16 +148,13 @@ impl SchemaWriter {
     async fn produce_unfenced(&self, key: Vec<u8>, value: Option<Vec<u8>>) -> anyhow::Result<i64> {
         // Boxed for the same reason as the transactional path: the producer's
         // send future is large.
-        let rx = Box::pin(self.producer.send(ProducerRecord {
+        let meta = Box::pin(self.producer.send(ProducerRecord {
             topic: self.topic.clone(),
             key: Some(Bytes::from(key)),
             value: value.map(Bytes::from),
             ..Default::default()
         }))
-        .await;
-        let meta = rx
-            .await
-            .map_err(|_| anyhow::anyhow!("producer dropped ack"))??;
+        .await?;
         tracing::Span::current().record("offset", meta.offset);
         Ok(meta.offset)
     }
@@ -180,9 +177,7 @@ impl SchemaWriter {
                     value: value.map(Bytes::from),
                     ..Default::default()
                 })
-                .await
-                .await
-                .map_err(|_| anyhow::anyhow!("producer dropped ack"))??;
+                .await?;
             // An empty TxnOffsetCommit still validates the election group's
             // generation and member id. A stale primary is rejected before
             // EndTxn can commit its schema record.
