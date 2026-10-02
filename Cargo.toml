@@ -91,8 +91,8 @@ krabka-client-admin = { git = "https://github.com/krabka-io/krabka-client-rs", r
 krabka-client-consumer = { git = "https://github.com/krabka-io/krabka-client-rs", rev = "92a5f3df874fb9b89f4b0b51124c3ce1bfd6f9aa" }
 krabka-client-core = { git = "https://github.com/krabka-io/krabka-client-rs", rev = "92a5f3df874fb9b89f4b0b51124c3ce1bfd6f9aa" }
 krabka-client-producer = { git = "https://github.com/krabka-io/krabka-client-rs", rev = "92a5f3df874fb9b89f4b0b51124c3ce1bfd6f9aa" }
-krabka-authz = { git = "https://github.com/krabka-io/krabka-broker", rev = "b9e35872a56a00137c937e2070a2c1b3c6c76350" }
-krabka-audit = { git = "https://github.com/krabka-io/krabka-broker", rev = "b9e35872a56a00137c937e2070a2c1b3c6c76350" }
-krabka-broker = { git = "https://github.com/krabka-io/krabka-broker", rev = "b9e35872a56a00137c937e2070a2c1b3c6c76350" }
-krabka-telemetry = { git = "https://github.com/krabka-io/krabka-broker", rev = "b9e35872a56a00137c937e2070a2c1b3c6c76350" }
+krabka-authz = { git = "https://github.com/krabka-io/krabka-broker", rev = "505d7c890d46d3937f35e92753c65733f3bf4b88" }
+krabka-audit = { git = "https://github.com/krabka-io/krabka-broker", rev = "505d7c890d46d3937f35e92753c65733f3bf4b88" }
+krabka-broker = { git = "https://github.com/krabka-io/krabka-broker", rev = "505d7c890d46d3937f35e92753c65733f3bf4b88" }
+krabka-telemetry = { git = "https://github.com/krabka-io/krabka-broker", rev = "505d7c890d46d3937f35e92753c65733f3bf4b88" }
 krabka-schema-serde = { path = "crates/schema-serde" }
