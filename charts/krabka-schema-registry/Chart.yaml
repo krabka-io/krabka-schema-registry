@@ -8,7 +8,7 @@ version: 0.1.0
 # from the workspace Cargo.toml when it packages the chart. The `image` CI job
 # fails when this value and the workspace version differ, because `delivery`
 # publishes the image under the workspace version.
-appVersion: "0.4.0"
+appVersion: "0.4.1"
 kubeVersion: ">= 1.28.0-0"
 home: https://github.com/krabka-io/krabka-schema-registry
 sources:
