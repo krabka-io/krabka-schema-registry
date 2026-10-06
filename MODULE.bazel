@@ -189,6 +189,7 @@ SIBLING_MEMBERS = {
     "krabka-kraft-core": "crates/kraft-core",
     "krabka-log": "crates/log",
     "krabka-logfmt": "crates/logfmt",
+    "krabka-macros": "crates/macros",
     "krabka-object-store": "crates/object-store",
     "krabka-raft": "crates/raft",
     "krabka-records-legacy": "crates/records-legacy",
