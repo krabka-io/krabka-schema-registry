@@ -256,18 +256,24 @@ jobs:
       # limit: a burst of five, then one every ten minutes. A 429 answer waits
       # and tries again. A crate that still fails stops the job; a rerun skips
       # every crate that went through.
+      #
+      # A trusted-publishing token lives 30 minutes and is not renewed, so in
+      # that mode the job waits at most twice; a third wait would upload with
+      # an expired token. Only a new crate name meets the strict limit, and
+      # that first publish uses the bootstrap token, which allows six waits.
       - name: publish
         env:
           CRATES: ${{ needs.plan.outputs.crates }}
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token || secrets.CARGO_REGISTRY_TOKEN }}
+          ATTEMPTS: ${{ steps.credential.outputs.mode == 'oidc' && 3 || 7 }}
         run: |
           set -o pipefail
           for crate in ${CRATES}; do
-            for attempt in 1 2 3 4 5 6 7; do
+            for attempt in $(seq "${ATTEMPTS}"); do
               if cargo publish --locked --no-verify -p "${crate}" 2>&1 | tee "${RUNNER_TEMP}/publish.log"; then
                 break
               fi
-              if ! grep -q '429' "${RUNNER_TEMP}/publish.log" || [ "${attempt}" = 7 ]; then
+              if ! grep -q '429' "${RUNNER_TEMP}/publish.log" || [ "${attempt}" = "${ATTEMPTS}" ]; then
                 echo "::error::cargo publish failed for ${crate}"
                 exit 1
               fi

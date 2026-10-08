@@ -15,12 +15,18 @@ The workspace releases as one unit. Every published crate inherits
 
 `krabka-schema-registry` sets `publish = false`. It is the service, not a
 library. Operators get it as the `ghcr.io/krabka-io/krabka-schema-registry`
-image and the Helm chart, which `ci.yml` publishes on each push to `main`. A
-new member crate is published unless its manifest sets `publish = false`.
+image, which the `delivery` job of `ci.yml` pushes on each push to `main`, and
+as the Helm chart, which the `helm-index` job of
+[krabka-io/krabka-io.github.io](https://github.com/krabka-io/krabka-io.github.io)
+packages into https://krabka.io/charts. Neither is part of a crates.io
+release. A new member crate is published unless its manifest sets
+`publish = false`.
 
 `krabka-schema-serde` takes `repository`, `license`, `authors`, `edition` and
-`rust-version` from the workspace. Its `include` list ships the library source
-and its README, but not its tests or fixtures. Cargo prints an "ignoring test"
+`rust-version` from the workspace. Its `include` list ships the library source,
+its README, and the `LICENSE` and `NOTICE` that Apache-2.0 requires with a
+distribution. Those two are symlinks to the repository-root files, and cargo
+packages their contents. Tests and fixtures stay out. Cargo prints an "ignoring test"
 warning for each `[[test]]` that the package leaves out. The warnings are
 expected.
 

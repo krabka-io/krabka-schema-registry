@@ -11,9 +11,10 @@ documentation = "https://docs.rs/krabka-schema-serde"
 readme = "README.md"
 keywords = ["kafka", "schema", "avro", "protobuf", "krabka"]
 categories = ["encoding", "api-bindings"]
-# Ship the library source only. The tests and their fixtures stay in the
-# repository.
-include = ["/src/**", "/Cargo.toml", "/README.md"]
+# Ship the library source, its README, and the LICENSE and NOTICE that
+# Apache-2.0 requires with a distribution (symlinks to the repository-root
+# copies). The tests and their fixtures stay in the repository.
+include = ["/src/**", "/Cargo.toml", "/README.md", "/LICENSE", "/NOTICE"]
 
 [lints]
 workspace = true
