@@ -5,7 +5,7 @@ members = ["crates/*"]
 exclude = ["tools/mutants"]
 
 [workspace.package]
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 license = "Apache-2.0"
 authors = ["The Krabka Authors"]
@@ -69,7 +69,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 # First-party crates inherited by more than one member.
 krabka-units = "0.5.0"
-krabka-schema-serde = { version = "0.4.1", path = "crates/schema-serde" }
+krabka-schema-serde = { version = "0.4.2", path = "crates/schema-serde" }
 # The in-process broker that the test suites of both members start. It is a git
 # dependency, not a crates.io requirement, because krabka-broker is not on
 # crates.io: `cargo publish` drops a dev-dependency without a `version`, so the
