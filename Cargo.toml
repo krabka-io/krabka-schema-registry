@@ -10,6 +10,7 @@ edition = "2024"
 license = "Apache-2.0"
 authors = ["The Krabka Authors"]
 rust-version = "1.98.1"
+repository = "https://github.com/krabka-io/krabka-schema-registry"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -69,6 +70,12 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # First-party crates inherited by more than one member.
 krabka-units = "0.5.0"
 krabka-schema-serde = { path = "crates/schema-serde" }
+# The in-process broker that the test suites of both members start. It is a git
+# dependency, not a crates.io requirement, because krabka-broker is not on
+# crates.io: `cargo publish` drops a dev-dependency without a `version`, so the
+# published krabka-schema-serde does not name it. Keep `rev` equal to the
+# krabka-broker rows of the patch block below.
+krabka-broker = { git = "https://github.com/krabka-io/krabka-broker", rev = "a23b3c0f930d034d8c9d791eed953537e3028279" }
 
 # Sibling repositories, pinned by revision. These crates are declared against
 # crates.io above and in the member manifests; the patch below is the single

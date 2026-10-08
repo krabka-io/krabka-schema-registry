@@ -6,12 +6,14 @@ license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 description = "Confluent-compatible schema serdes (Avro/Protobuf/JSON) for Krabka clients"
-repository = "https://github.com/krabka-io/krabka-schema-registry"
-homepage = "https://github.com/krabka-io/krabka-schema-registry"
+repository.workspace = true
 documentation = "https://docs.rs/krabka-schema-serde"
 readme = "README.md"
 keywords = ["kafka", "schema", "avro", "protobuf", "krabka"]
 categories = ["encoding", "api-bindings"]
+# Ship the library source only. The tests and their fixtures stay in the
+# repository.
+include = ["/src/**", "/Cargo.toml", "/README.md"]
 
 [lints]
 workspace = true
@@ -39,7 +41,8 @@ schemars = { workspace = true, optional = true }
 jsonschema = { workspace = true, optional = true }
 
 [dev-dependencies]
-krabka-broker = { version = "0.7.0" }
+# No `version`, so that `cargo publish` drops it. See the workspace entry.
+krabka-broker = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
 serde_json = { workspace = true }
 hex = { workspace = true }

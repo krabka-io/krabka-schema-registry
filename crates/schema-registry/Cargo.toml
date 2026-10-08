@@ -85,7 +85,7 @@ tikv-jemallocator = { version = "0.7", optional = true, features = ["profiling",
 # `wait_until_transaction_coordinator_ready`. A broker creates its coordinator
 # topics on first use, and `tests/broker_support` brings them up after every
 # in-process broker start.
-krabka-broker = { version = "0.7.0", features = ["test-helpers"] }
+krabka-broker = { workspace = true, features = ["test-helpers"] }
 prost = { workspace = true }
 ring = { workspace = true }
 schemars = { workspace = true }
