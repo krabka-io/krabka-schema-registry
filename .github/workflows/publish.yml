@@ -9,17 +9,18 @@ name: publish
 #
 # The publish job authenticates in one of two ways:
 #
-# - Token. When the `CARGO_REGISTRY_TOKEN` secret of the `crates-io`
-#   environment is set, cargo uses it. crates.io allows trusted publishing only
-#   for a crate that already exists, so the first publish of each new name
-#   needs this token.
-# - Trusted publishing. When the secret is not set,
+# - Token. When the krabka-io organization secret `CARGO_REGISTRY_TOKEN`
+#   reaches this repository, cargo uses it. crates.io allows trusted
+#   publishing only for a crate that already exists, so the first publish of
+#   each new name needs this token.
+# - Trusted publishing. When the secret does not reach this repository,
 #   `rust-lang/crates-io-auth-action` exchanges the job's GitHub OIDC token for
 #   a crates.io token that expires after 30 minutes and is revoked at the end
 #   of the job.
 #
-# docs/releasing.md gives the procedure: bootstrap with the token, configure
-# trusted publishing for each crate, then delete the secret.
+# docs/releasing.md gives the procedure: bootstrap with the organization
+# token, configure trusted publishing for each crate, then remove this
+# repository from the secret's repository access.
 #
 # A rerun is safe. The plan step asks crates.io which versions exist and
 # publishes only the others.
@@ -218,8 +219,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     # crates.io's trusted-publisher entry for each crate names this
-    # environment. It also holds the bootstrap token, so the secret is
-    # unreadable to every other job and workflow.
+    # environment, and its tag rule keeps the publish to `v*` tags. The
+    # bootstrap token is an organization secret, not an environment one.
     environment: crates-io
     permissions:
       contents: read
@@ -235,7 +236,7 @@ jobs:
           HAS_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
         run: |
           if [ "${HAS_TOKEN}" = true ]; then
-            echo 'CARGO_REGISTRY_TOKEN is set: publishing with the bootstrap token.'
+            echo 'CARGO_REGISTRY_TOKEN is set: publishing with the organization bootstrap token.'
             echo mode=token >>"${GITHUB_OUTPUT}"
           else
             echo 'CARGO_REGISTRY_TOKEN is not set: publishing through trusted publishing.'

@@ -111,17 +111,22 @@ A manual run takes two inputs:
 
 The `publish` job authenticates with one of two credentials:
 
-- **A token.** When the `CARGO_REGISTRY_TOKEN` secret of the `crates-io`
-  environment is set, the job uses it.
-- **Trusted publishing.** When that secret is not set, the job runs
+- **The organization token.** When the krabka-io organization secret
+  `CARGO_REGISTRY_TOKEN` reaches this repository, the job uses it.
+- **Trusted publishing.** When that secret does not reach this repository, the
+  job runs
   [`rust-lang/crates-io-auth-action`](https://github.com/rust-lang/crates-io-auth-action).
   The action exchanges the job's GitHub OIDC token for a crates.io token. That
   token expires after 30 minutes, and the action revokes it when the job ends.
   No long-lived secret exists.
 
 crates.io allows trusted publishing only for a crate that already exists. So
-the first release of each crate name needs the token, and every later release
-uses trusted publishing.
+the first release of each crate name needs the organization token, and every
+later release uses trusted publishing.
+
+An organization secret is readable by every workflow of each repository it
+reaches, not only by the `crates-io` environment. Keep this repository on the
+secret's access list only while a crate name still needs its first publish.
 
 ### Once: the GitHub environment
 
@@ -131,13 +136,11 @@ reviewers if a person should approve each publish.
 
 ### First publish of a crate name
 
-1. Sign in to crates.io with the account that will own the crates. Under
-   **Account Settings**, open **API Tokens** and create a token with the
-   `publish-new` and `publish-update` scopes. Limit it to the crate pattern
-   `krabka-*` and give it a short expiry.
-2. Add the token to the `crates-io` environment as the secret
-   `CARGO_REGISTRY_TOKEN`.
-3. Push the release tag, or rerun `publish.yml` on it.
+1. In the krabka-io organization settings, open **Secrets and variables**,
+   then **Actions**, then `CARGO_REGISTRY_TOKEN`. Under **Repository access**,
+   add `krabka-schema-registry`.
+2. Push the release tag, or rerun `publish.yml` on it. The log says
+   "publishing with the organization bootstrap token".
 
 crates.io limits new crate names to a burst of five, then one every ten
 minutes. On a `429` answer the job waits ten minutes and tries again.
@@ -154,13 +157,15 @@ For each published crate:
    - Workflow filename: `publish.yml`
    - Environment: `crates-io`
 
-When every published crate has a publisher, delete the `CARGO_REGISTRY_TOKEN`
-secret, and revoke the token on crates.io. The next release uses trusted
-publishing. Its log says "publishing through trusted publishing".
+When every published crate has a publisher, remove `krabka-schema-registry`
+from the repository access of the organization secret. Do not delete the
+secret: other krabka repositories bootstrap their crates with it. The next
+release uses trusted publishing. Its log says "publishing through trusted
+publishing".
 
 A crate that joins the published set later needs the token once, for its
-first release. Add the secret again for that release, configure the new
-crate's publisher, and delete the secret again.
+first release. Add this repository to the secret's access again for that
+release, configure the new crate's publisher, and remove the repository again.
 
 ## The crabka-schema-serde crate
 
