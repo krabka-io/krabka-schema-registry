@@ -111,4 +111,4 @@ fetch. It returns a retriable `WriterSchemaPending` error until the cache fills.
 ## License
 
 Apache-2.0. Derivative work of [Apache Kafka](https://kafka.apache.org); see
-[NOTICE](https://github.com/robot-head/crabka/blob/main/NOTICE).
+[NOTICE](https://github.com/krabka-io/krabka-schema-registry/blob/main/NOTICE).
