@@ -61,9 +61,12 @@ authorizer and telemetry crates and for the in-process broker the integration
 suites use. All three are pinned by revision in one place — the
 `[patch.crates-io]` block at the bottom of the root `Cargo.toml`. Member
 manifests declare those crates as ordinary `krabka-x = "0.4.0"` requirements;
-the patch is what redirects them at the git checkouts. To move to a newer
-sibling, change the revision there, re-run `cargo generate-lockfile`, and commit
-both files.
+the patch is what redirects them at the git checkouts. The one exception is the
+`krabka-broker` crate itself, which is not on crates.io: it is a git
+`[workspace.dependencies]` entry that the members take as a dev-dependency, and
+its `rev` must equal the `krabka-broker` rows of the patch block. To move to a
+newer sibling, change the revision there, re-run `cargo generate-lockfile`, and
+commit both files.
 
 `krabka-schema-serde` is patched to its own path in that same block. This
 workspace builds it, and `krabka-broker` depends on it too, so without the patch
@@ -141,6 +144,19 @@ shape.
 
 ## Releases
 
-This repository has no release automation. The `krabka-*` crates.io names are
-still published from [`robot-head/crabka`](https://github.com/robot-head/crabka);
-consumers here pin by git revision.
+A `vX.Y.Z` tag on `main` starts `.github/workflows/publish.yml`, which publishes
+every member crate without `publish = false` to crates.io. Today that is
+`krabka-schema-serde` alone; the `krabka-schema-registry` service crate sets
+`publish = false`. A new crate that is not a library for other repositories
+sets `publish = false`.
+
+Every `krabka-*` normal dependency of a published crate carries a `version` as
+well as its `path` or git `rev`, because `cargo publish` ignores
+`[patch.crates-io]` and keeps only the `version`. A git dependency that is not
+on crates.io, such as the in-process `krabka-broker`, may appear only as a
+dev-dependency, and without a `version`, so that cargo drops it from the
+published manifest. Its `rev` in `[workspace.dependencies]` moves together with
+the `krabka-broker` rows of the patch block.
+
+[`docs/releasing.md`](docs/releasing.md) is the procedure, including the token
+bootstrap for a new crate name and the switch to trusted publishing.
