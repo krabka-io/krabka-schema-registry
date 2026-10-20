@@ -101,12 +101,14 @@ sh_test(
     srcs = ["image_binaries_test.sh"],
     args = [
         IMAGE_ARCH,
+        "$(rootpath //:Cargo.toml)",
         "$(rootpath :image_manifest_blob)",
         "$(rootpath :registry_layer)",
     ],
     data = [
         ":image_manifest_blob",
         ":registry_layer",
+        "//:Cargo.toml",
     ],
 )
 

@@ -13,16 +13,17 @@
 #     architecture is a constant, so on a host that is not amd64 the two
 #     disagree. //packaging:image is restricted to x86_64 for that reason.
 #
-# Argument 1 is the architecture that the manifest declares (IMAGE_ARCH in
-# //packaging/BUILD.bazel). Argument 2 is the image manifest JSON. The rest are
+# Argument 1 is the architecture (IMAGE_ARCH in //packaging/BUILD.bazel).
+# Argument 2 is Cargo.toml; argument 3 is the image manifest JSON. The rest are
 # the layer tarballs. //packaging:image_binaries_test passes all of them.
 set -euo pipefail
 
 expected=(krabka-schema-registry)
 
 arch="$1"
-manifest="$2"
-shift 2
+cargo_manifest="$2"
+manifest="$3"
+shift 3
 layers=("$@")
 
 fail() {
@@ -87,6 +88,9 @@ if [[ "${shipped}" != "${want}" ]]; then
     fail "/usr/bin holds [${shipped}], expected [${want}]"
 fi
 
+workspace_version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' "${cargo_manifest}")"
+[[ -n "${workspace_version}" ]] || fail "workspace version is missing"
+
 for binary in "${expected[@]}"; do
     path="${rootfs}/usr/bin/${binary}"
     [[ -x "${path}" ]] || fail "${binary} is not executable in the image"
@@ -97,6 +101,9 @@ for binary in "${expected[@]}"; do
     status=0
     "${path}" --help >/dev/null 2>&1 || status=$?
     [[ "${status}" -eq 0 ]] || fail "${binary} --help exited ${status}"
+    actual_version="$("${path}" --version)"
+    [[ "${actual_version}" == "${binary} ${workspace_version}" ]] ||
+        fail "${binary} reports ${actual_version}; expected ${workspace_version}"
 done
 
 echo "image_binaries_test: ${#expected[@]} ${arch} binary under /usr/bin, answering --help"
