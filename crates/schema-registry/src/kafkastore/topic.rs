@@ -5,8 +5,8 @@
 use std::collections::BTreeMap;
 
 use krabka_client_admin::{
-    AdminClient, AdminError, Config, ConfigResource, CreateTopicSpec, DescribeConfigsOptions,
-    DescribeConfigsResults, TopicMutationOptions,
+    AdminClient, AdminClientLike as _, AdminError, Config, ConfigResource, CreateTopicSpec,
+    DescribeConfigsOptions, DescribeConfigsResults, TopicMutationOptions,
 };
 use krabka_client_core::{ClientError, ClientSecurity};
 use krabka_protocol::primitives::uuid::Uuid as WireUuid;

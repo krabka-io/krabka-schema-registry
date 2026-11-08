@@ -116,7 +116,11 @@ pub async fn start(registry_url: &str) -> Vec<Node> {
         let broker = start.await.unwrap().unwrap();
         nodes.push(Node { broker, dir });
     }
-    nodes[0].broker.wait_until_controller_leader().await;
+    nodes[0]
+        .broker
+        .wait_until_controller_leader()
+        .await
+        .expect("controller leader");
     for node in &nodes {
         node.broker.wait_until_brokers_registered(BROKERS).await;
     }

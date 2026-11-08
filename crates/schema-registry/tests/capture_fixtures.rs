@@ -36,7 +36,7 @@ use std::{
 };
 
 use krabka_broker::{Broker, BrokerConfig, NodeId};
-use krabka_client_admin::AdminClient;
+use krabka_client_admin::{AdminClient, AdminClientLike as _};
 use krabka_client_core::{Connection, ConnectionOptions, fetch_partition};
 use krabka_protocol::primitives::uuid::Uuid as WireUuid;
 use krabka_units::prelude::*;
