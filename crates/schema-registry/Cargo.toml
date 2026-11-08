@@ -35,15 +35,15 @@ path = "src/bin/schema-compat-check.rs"
 
 [dependencies]
 assert2 = { workspace = true }
-krabka-client-core = { version = "0.6.0" }
-krabka-client-admin = { version = "0.6.0" }
-krabka-client-producer = { version = "0.6.0" }
-krabka-protocol = { version = "0.6.0", default-features = false }
-krabka-security = { version = "0.6.0" }
-krabka-authz = { version = "1.0.0" }
-krabka-audit = { version = "1.0.0" }
-krabka-metadata = { version = "0.6.0" }
-krabka-telemetry = { version = "1.0.0" }
+krabka-client-core = { version = "0.8.0" }
+krabka-client-admin = { version = "0.8.0" }
+krabka-client-producer = { version = "0.8.0" }
+krabka-protocol = { version = "0.8.0", default-features = false }
+krabka-security = { version = "0.8.0" }
+krabka-authz = { version = "1.1.5" }
+krabka-audit = { version = "1.1.5" }
+krabka-metadata = { version = "0.8.0" }
+krabka-telemetry = { version = "1.1.5" }
 krabka-units = { workspace = true }
 krabka-schema-serde = { workspace = true, features = ["avro", "json", "protobuf"] }
 arc-swap = { workspace = true }

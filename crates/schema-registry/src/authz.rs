@@ -25,6 +25,7 @@ use krabka_audit::{
     AuditEndpoint, AuditEvent, AuditLog, AuditOutcome, AuditPrincipal, AuditResource,
 };
 use krabka_authz::{AclCache, AuthorizationRequest, AuthorizationResult, Authorizer};
+use krabka_client_admin::AdminClientLike as _;
 use krabka_metadata::{AclOperation, ResourceType};
 use krabka_security::Principal;
 use krabka_units::prelude::*;

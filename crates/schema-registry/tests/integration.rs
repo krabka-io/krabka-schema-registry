@@ -17,7 +17,9 @@ use axum::{
     http::{Request, StatusCode},
 };
 use krabka_broker::{BootstrapMode, Broker, BrokerConfig, BrokerHandle, NodeId};
-use krabka_client_admin::{AdminClient, CreateTopicSpec, TopicMutationOptions};
+use krabka_client_admin::{
+    AdminClient, AdminClientLike as _, CreateTopicSpec, TopicMutationOptions,
+};
 use krabka_client_core::Client;
 use krabka_schema_registry::{
     config::{RegistryConfig, SecurityConfig},

@@ -33,11 +33,11 @@ bazel_dep(name = "llvm", version = "0.8.24")
 
 # rules_rs merges coverage with this module's llvm-profdata, which reads only
 # the raw profile version of its own LLVM. rustc writes the version of the LLVM
-# it was built on, so the two majors must match: 22.x for Rust 1.98 (`rustc
-# -vV` prints it). The module's own default, 23.x, fails every test in `bazel
-# coverage` with "raw profile version mismatch". Move this with the toolchain.
+# it was built on, so the two majors must match: 23.x for Rust 1.99 (`rustc
+# -vV` prints it). A mismatch fails every test in `bazel coverage` with "raw
+# profile version mismatch". Move this with the toolchain.
 llvm = use_extension("@llvm//extensions:llvm.bzl", "llvm")
-llvm.version(llvm_version = "22.1.8")
+llvm.version(llvm_version = "23.1.2")
 use_repo(llvm, "llvm-project")
 
 register_toolchains("@llvm//toolchain:all")
@@ -108,7 +108,7 @@ toolchains.toolchain(
     # exactly this.
     rustfmt_version = "nightly/2026-08-14",
     # Matches rust-toolchain.toml.
-    version = "1.98.1",
+    version = "1.99.1",
 )
 use_repo(toolchains, "default_rust_toolchains")
 
@@ -186,6 +186,7 @@ SIBLING_MEMBERS = {
     "krabka-authz": "crates/authz",
     "krabka-broker": "crates/broker",
     "krabka-format": "crates/format",
+    "krabka-java-regex": "crates/java-regex",
     "krabka-kraft-core": "crates/kraft-core",
     "krabka-log": "crates/log",
     "krabka-logfmt": "crates/logfmt",

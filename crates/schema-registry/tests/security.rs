@@ -30,7 +30,8 @@ use axum::Router;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD as B64};
 use krabka_broker::{Broker, BrokerConfig};
 use krabka_client_admin::{
-    AclEntry, AclOperation, AdminClient, PatternType, PermissionType, ResourceType,
+    AclEntry, AclOperation, AdminClient, AdminClientLike as _, PatternType, PermissionType,
+    ResourceType,
 };
 use krabka_schema_registry::{
     auth::{AuthState, basic::BasicAuthStore},

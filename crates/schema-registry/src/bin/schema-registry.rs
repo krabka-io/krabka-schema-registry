@@ -351,6 +351,14 @@ struct Args {
     /// TLS SNI / server name for the broker connection (SSL / `SASL_SSL`).
     #[arg(long, env = "SCHEMA_REGISTRY_KAFKA_TLS_SERVER_NAME")]
     kafka_tls_server_name: Option<String>,
+
+    // ── Telemetry ───────────────────────────────────────────────────────────
+    /// Google Cloud project whose Cloud Trace holds the schema registry's
+    /// traces. With it set and OTLP export on, a log entry written inside a
+    /// traced span links to its trace in Cloud Logging. Unset, entries carry
+    /// no trace keys. The broker and the gateway read the same variable.
+    #[arg(long, env = "KRABKA_GCP_PROJECT_ID")]
+    gcp_project_id: Option<String>,
 }
 
 #[tokio::main]
@@ -373,6 +381,7 @@ async fn main() -> anyhow::Result<()> {
         "krabka_schema_registry=info,info",
         "info",
         "krabka-schema-registry",
+        args.gcp_project_id.clone(),
     )?;
 
     if let Some(admin_listen_addr) = args.admin_listen_addr.0 {
@@ -978,6 +987,45 @@ mod tests {
                 assert!(
                     args.admin_listen_addr.0
                         == Some("127.0.0.1:9600".parse().expect("parse expected address"))
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn gcp_project_id_reads_environment_and_prefers_cli() {
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("environment lock");
+
+        for (environment, flag, expected) in [
+            (None, None, None),
+            (Some("env-project"), None, Some("env-project")),
+            (
+                None,
+                Some("--gcp-project-id=cli-project"),
+                Some("cli-project"),
+            ),
+            (
+                Some("env-project"),
+                Some("--gcp-project-id=cli-project"),
+                Some("cli-project"),
+            ),
+        ] {
+            temp_env::with_var("KRABKA_GCP_PROJECT_ID", environment, || {
+                let args = Args::try_parse_from(
+                    [
+                        "krabka-schema-registry",
+                        "--bootstrap-servers=localhost:9092",
+                    ]
+                    .into_iter()
+                    .chain(flag),
+                )
+                .expect("parse gcp project id");
+                assert!(
+                    args.gcp_project_id.as_deref() == expected,
+                    "environment {environment:?}, flag {flag:?}"
                 );
             });
         }
