@@ -1,6 +1,7 @@
 name: ci
 on:
   pull_request:
+  merge_group:
   push:
     branches: [main]
   schedule:
@@ -290,3 +291,14 @@ jobs:
             fi
           done
           echo "Published ${IMAGE}:${GITHUB_SHA} and ${IMAGE}:${VERSION} as ${digest}."
+
+  gate:
+    name: gate
+    if: always()
+    needs: [ci, docker-interop, coverage, docs, helm, image, delivery]
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: krabka-io/tooling/actions/gate@1fb9d942c2def2fcfa20c19ed8ae8a7d8f220f65
+        with:
+          results: ${{ toJSON(needs) }}
+          allow-skipped: docker-interop,delivery
